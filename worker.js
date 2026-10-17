@@ -374,7 +374,7 @@ function bodyOf(payload) {
   walk(payload);
   let t = plain || htmlToText(htm);
   // הסרת ציטוט של מייל קודם
-  const cut = t.search(/\n\s*(On .{5,120}wrote:|ב.{3,120}נכתב:|ב.{3,120}כתב\/ה:|-{3,}\s*Original Message|-{3,}\s*Forwarded message|From: .+\n.*(Sent|Date):)/i);
+  const cut = t.search(/\n\s*(On .{5,120}wrote:|ב.{3,120}נכתב:|ב.{3,120}כתב\/ה:|\u202b?בתאריך .{5,200}מאת .{3,120}:|-{3,}\s*Original Message|-{3,}\s*Forwarded message|From: .+\n.*(Sent|Date):)/i);
   if (cut > 40) t = t.slice(0, cut);
   t = t.split("\n").filter((l) => !/^\s*>/.test(l)).join("\n");
   return t.replace(/\n{2,}/g, "\n").trim();
@@ -1683,9 +1683,12 @@ async function chatSendAudio(env, space, bytes, caption = "") {
   const r = await fetch(`https://chat.googleapis.com/upload/v1/${space}/attachments:upload?uploadType=multipart`, {
     method: "POST", headers: { Authorization: "Bearer " + (await accessToken(env)), "Content-Type": `multipart/related; boundary=${b}` }, body,
   });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || !j.attachmentUploadToken) throw new Error("chat upload " + r.status + " " + (j.error?.message || ""));
-  return gapi(env, `${G.chat}${space}/messages`, { body: { text: caption ? "🎤 " + caption : "🎤 הודעה קולית", attachment: [{ attachmentUploadToken: j.attachmentUploadToken }] } });
+  const raw = await r.text();
+  let j = {};
+  try { j = JSON.parse(raw); } catch {}
+  const token = j.attachmentUploadToken || j.attachment_upload_token || j.uploadedAttachment?.attachmentUploadToken;
+  if (!r.ok || !token) throw new Error("chat upload " + r.status + " " + trimText(raw, 200));
+  return gapi(env, `${G.chat}${space}/messages`, { body: { text: caption ? "🎤 " + caption : "🎤 הודעה קולית", attachment: [{ attachmentUploadToken: token }] } });
 }
 
 // ---- סיכום
@@ -2923,10 +2926,10 @@ async function ttsBytes(env, text) {
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${env.GEMINI_KEY}`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: "קרא בעברית, בקול גברי רגוע וברור, בקצב טבעי של שיחה בטלפון. שמות באנגלית בטא כרגיל:\n" + text }] }],
+          contents: [{ parts: [{ text }] }],
           generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: env.TTS_VOICE || "Orus" } } } },
         }),
-        signal: AbortSignal.timeout(14000),
+        signal: AbortSignal.timeout(12000),
       });
       const j = await r.json();
       bump(env, "tts");
@@ -2946,7 +2949,7 @@ async function ttsBytes(env, text) {
   throw new Error("tts: " + last);
 }
 async function ttsFile(env, text) {
-  const key = (await sha("v1|" + (env.TTS_VOICE || "Orus") + "|" + text)).slice(0, 24);
+  const key = (await sha("v2|" + (env.TTS_VOICE || "Orus") + "|" + text)).slice(0, 24);
   const file = "/tts/" + key;
   if (await env.KV.get("tts:" + key)) return file;
   const wav = await ttsBytes(env, text);
@@ -3496,15 +3499,30 @@ async function aiAsk(st, ctx, text) {
 
 // ---- מיילים לקלאוד: מייל שהוא שולח מהמייל העסקי לעצמו, עם "שש" בנושא
 const CL_SUBJECT = "שש";
+const CL_COPY_SUBJECT = "תשובה מקלאוד בקו";
+// כל הכתובות שהוא שולח מהן (המייל העסקי וכתובות "שלח בשם" שלו), במטמון ליום
+async function myAddresses(env) {
+  const c = await kvJson(env, "myaddrs");
+  if (c && Date.now() - c.t < 86400e3) return c.list;
+  const set = new Set([String(env.BUSINESS_EMAIL || "").toLowerCase()]);
+  try { (await gapi(env, `${G.gmail}settings/sendAs`)).sendAs?.forEach((a) => a.sendAsEmail && set.add(a.sendAsEmail.toLowerCase())); } catch {}
+  try { const p = await gapi(env, `${G.gmail}profile`); if (p.emailAddress) set.add(p.emailAddress.toLowerCase()); } catch {}
+  const list = [...set];
+  await env.KV.put("myaddrs", JSON.stringify({ t: Date.now(), list }));
+  return list;
+}
 async function claudeMails(env) {
-  const me = String(env.BUSINESS_EMAIL || "").toLowerCase();
+  const mine = new Set(await myAddresses(env));
   const done = new Set(await kvJson(env, "clmail:done", []));
-  const ids = await gmailIds(env, `from:${me} to:${me} subject:${CL_SUBJECT} newer_than:14d`, 20);
+  const ids = await gmailIds(env, `(subject:${CL_SUBJECT} OR subject:"${CL_COPY_SUBJECT}") newer_than:14d`, 30);
   const out = [];
   for (const id of ids.filter((x) => !done.has(x))) {
     const m = await gmailGet(env, id).catch(() => null);
-    if (!m || m.fromEmail.toLowerCase() !== me) continue;
-    if (!/(^|\s)שש(\s|$|:)/.test(m.subject.replace(/^(re|fwd?)\s*:\s*/i, ""))) continue;
+    if (!m || !mine.has(m.fromEmail.toLowerCase())) continue;
+    const subj = m.subject.replace(/^(re|fwd?)\s*:\s*/i, "");
+    const isCopyThread = subj.startsWith(CL_COPY_SUBJECT);
+    if (!isCopyThread && !/(^|\s)שש(\s|$|:)/.test(subj)) continue;
+    if (/^\s*(השאלה שלך:|התשובה:)/.test(m.body)) continue; // עותק שהקו עצמו שלח
     out.push({ id, threadId: m.threadId, subject: m.subject, text: trimText(m.body, 6000), at: m.date, msgId: m.msgId, refs: m.refs });
   }
   return out;
@@ -3523,8 +3541,10 @@ async function claudeEmailReply(env, id, text) {
 }
 // עותק במייל של תשובה שקלאוד נתן בקו
 async function mailCopyOfAnswer(env, question, answer) {
-  try { await gmailSend(env, { to: env.BUSINESS_EMAIL, subject: "תשובה מקלאוד בקו", body: `${question ? "השאלה שלך:\n" + question + "\n\n" : ""}התשובה:\n${answer}` }); }
-  catch (e) { await logEvent(env, "עותק במייל נכשל: " + e.message); }
+  try {
+    const r = await gmailSend(env, { to: env.BUSINESS_EMAIL, subject: CL_COPY_SUBJECT, body: `${question ? "השאלה שלך:\n" + question + "\n\n" : ""}התשובה:\n${answer}\n\n(אפשר להשיב למייל הזה, והתשובה תגיע לקלאוד)` });
+    if (r?.id) await markClaudeMailDone(env, r.id);
+  } catch (e) { await logEvent(env, "עותק במייל נכשל: " + e.message); }
 }
 
 // ---- זיכרון של העוזר החכם בין שיחות (סיכום קצר של מה שחשוב)
@@ -3763,6 +3783,7 @@ async function bridgeApi(req, env, url) {
     return J({ ...(await bridge(env, "peek")), new_emails, shabbat: isShabbatIL(), now_israel: nowIL() });
   }
   if (op === "emails") return J({ emails: await claudeMails(env) });
+  if (op === "state") return J(await bridge(env, "state"));
   if (op === "email_reply") {
     if (!body.id || !body.text) return J({ error: "id או text חסרים" });
     const r = await claudeEmailReply(env, body.id, String(body.text));
