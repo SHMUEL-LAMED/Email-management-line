@@ -2797,7 +2797,7 @@ H.clIntro = async (st, input, ctx, pre = "") => {
   st.cl.saidRun = true;
   const p = b.live
     ? "קלאוד מחובר עכשיו. דבר אחרי הצליל, ובסיום הקש סולמית. ליציאה הקש סולמית בלי לומר כלום."
-    : `קלאוד לא מחובר כרגע.${last} השאר הודעה אחרי הצליל, וקלאוד יענה בבדיקה הבאה. הבדיקות הן בימים ראשון עד חמישי, פעם בשעה, מאחת בצהריים עד ארבע, ומשבע בערב עד שתיים בלילה. אפשר גם לשלוח לקלאוד מייל מהמייל העסקי לעצמך, עם המילה שש בנושא. בסיום הקש סולמית. ליציאה הקש סולמית בלי לומר כלום.`;
+    : `קלאוד לא מחובר כרגע.${last} השאר הודעה אחרי הצליל, וקלאוד יענה בבדיקה הבאה. הבדיקות הן פעם בשעה, בימים ראשון עד חמישי מאחת בצהריים עד ארבע ומשבע בערב עד שתיים בלילה, וגם במוצאי שבת. אפשר גם לשלוח לקלאוד מייל מהמייל העסקי לעצמך, עם המילה שש בנושא. בסיום הקש סולמית. ליציאה הקש סולמית בלי לומר כלום.`;
   return (pre ? R.msg(pre) : "") + R.record(st, p);
 };
 H.clRec = async (st, input, ctx) => {
@@ -3766,10 +3766,28 @@ async function oauthCallback(env, url) {
 }
 
 // ---- API לריצה המתוזמנת של Claude (מוגן במפתח BRIDGE_KEY)
+// שקיעה בירושלים (חישוב אסטרונומי מקורב, דיוק של כמה דקות) – לזמני כניסת שבת וצאת שבת
+function sunsetIL(d = new Date()) {
+  const lat = 31.78, lng = 35.22, rad = Math.PI / 180;
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d).map((x) => [x.type, x.value]));
+  const jd = Date.UTC(+p.year, +p.month - 1, +p.day) / 86400e3 + 2440587.5; // יום יוליאני בחצות UTC
+  const n = Math.ceil(jd - 2451545.0 + 0.0008);
+  const Js = n - lng / 360;
+  const M = ((357.5291 + 0.98560028 * Js) % 360 + 360) % 360;
+  const C = 1.9148 * Math.sin(M * rad) + 0.02 * Math.sin(2 * M * rad) + 0.0003 * Math.sin(3 * M * rad);
+  const L = (M + C + 180 + 102.9372) % 360;
+  const Jtr = 2451545.0 + Js + 0.0053 * Math.sin(M * rad) - 0.0069 * Math.sin(2 * L * rad);
+  const dec = Math.asin(Math.sin(L * rad) * Math.sin(23.4397 * rad));
+  const cosH = (Math.sin(-0.833 * rad) - Math.sin(lat * rad) * Math.sin(dec)) / (Math.cos(lat * rad) * Math.cos(dec));
+  const H = Math.acos(Math.max(-1, Math.min(1, cosH))) / rad;
+  return new Date((Jtr + H / 360 - 2440587.5) * 86400e3);
+}
+// שבת: מ-60 דקות לפני השקיעה ביום שישי, עד 50 דקות אחרי השקיעה במוצאי שבת
 function isShabbatIL(d = new Date()) {
-  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jerusalem", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(d).map((x) => [x.type, x.value]));
-  const hm = (+p.hour % 24) * 60 + +p.minute;
-  return (p.weekday === "Fri" && hm >= 15 * 60 + 30) || (p.weekday === "Sat" && hm < 20 * 60);
+  const wd = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jerusalem", weekday: "short" }).format(d);
+  if (wd === "Fri") return d.getTime() >= sunsetIL(d).getTime() - 60 * 60e3;
+  if (wd === "Sat") return d.getTime() < sunsetIL(d).getTime() + 50 * 60e3;
+  return false;
 }
 async function bridgeApi(req, env, url) {
   const key = url.searchParams.get("k") || req.headers.get("x-bridge-key");
@@ -3827,4 +3845,4 @@ export default {
 };
 
 // לבדיקות
-export { saveMailToDrive, H, say, bodyOf, parseAddr, handleYemot, findPeople, toHebrew, transcribe, geminiTools, aiSystem, runMediaJob, scheduledTick, claudeMails, renderSpeech, chunkText };
+export { isShabbatIL, sunsetIL, saveMailToDrive, H, say, bodyOf, parseAddr, handleYemot, findPeople, toHebrew, transcribe, geminiTools, aiSystem, runMediaJob, scheduledTick, claudeMails, renderSpeech, chunkText };
