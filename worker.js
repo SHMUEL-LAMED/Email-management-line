@@ -2909,7 +2909,7 @@ H.mediaPlay = async (st, input, ctx) => {
   if (input === undefined || input === "1") {
     st.step = "mediaPlay";
     const v = nextVal(st);
-    return `read=f-${st.media.file}.${sp("לשמיעה חוזרת הקש 1. לחזרה הקש 0.", "m")}=${v},no,1,1,10,No,yes,no,,0.1,,Ok,none,`;
+    return `read=f-${st.media.file}.${sp("לשמיעה חוזרת הקש 1. לחזרה הקש 0.", "m")}=${v},no,1,1,10,No,no,no,,0.1.*,,Ok,none,`;
   }
   return mediaBack(st, ctx);
 };
