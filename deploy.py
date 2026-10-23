@@ -17,7 +17,7 @@ bindings = [
     {"type": "plain_text", "name": "ALLOWED_PHONES", "text": sec["ALLOWED_PHONES"]},
     {"type": "plain_text", "name": "BUSINESS_EMAIL", "text": sec["BUSINESS_EMAIL"]},
 ]
-for k in ("YM_TOKEN", "PIN", "PATH_KEY", "SETUP_KEY", "GOOGLE_CLIENT_SECRET", "GEMINI_KEY", "BRIDGE_KEY"):
+for k in ("YM_TOKEN", "PIN", "PATH_KEY", "SETUP_KEY", "GOOGLE_CLIENT_SECRET", "GEMINI_KEY", "BRIDGE_KEY", "YT_KEY"):
     if sec.get(k):
         bindings.append({"type": "secret_text", "name": k, "text": sec[k]})
 import os

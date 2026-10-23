@@ -93,7 +93,7 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.match(/messages\/x2$/) && method === "DELETE") { sent.push(["delmsg", url]); return json({}); }
   if (url.match(/messages\/x2\?updateMask/)) { sent.push(["editmsg", JSON.parse(init.body).text]); return json({}); }
   if (url.match(/spaces\/\w+\/messages(\?.*)?$/) && method === "POST") { sent.push(["chat", url.split("/v1/")[1].split("/messages")[0], JSON.parse(init.body).text?.slice(0, 50), JSON.parse(init.body).attachment ? "+audio" : ""]); return json({ name: "spaces/DM1/messages/new" }); }
-  if (url.includes("attachments:upload")) return json({ attachmentUploadToken: "tok" });
+  if (url.includes("attachments:upload")) return json({ attachmentDataRef: { resourceName: "spaces/DM1/attachments/up1", attachmentUploadToken: "tok" } }); // המבנה האמיתי של media.upload
   if (url.includes("findDirectMessage")) return json({ name: "spaces/DM1" });
   if (url.includes("chat.googleapis.com/v1/media/")) return new Response(new Uint8Array(3000));
   if (url.includes("upload/drive/v3/files")) { try { const b = Buffer.from(init.body).toString("utf8"); const meta = JSON.parse(b.split("\r\n\r\n")[1].split("\r\n")[0]); drive.push(meta); return json({ id: "up" + drive.length, name: meta.name, webViewLink: "https://drive/up" }); } catch (e) { console.log("UPLOAD MOCK ERR", e.message); throw e; } }

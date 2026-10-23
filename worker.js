@@ -37,6 +37,8 @@ const SCOPES = [
   "https://www.googleapis.com/auth/tasks",
   "https://www.googleapis.com/auth/meetings.space.created",
   "https://www.googleapis.com/auth/meetings.space.readonly",
+  // יוטיוב (חיפוש סרטונים וכותרות). חשבון שחובר לפני הוספת ההרשאה צריך חיבור מחדש בדף /connect, או מפתח YT_KEY
+  "https://www.googleapis.com/auth/youtube.readonly",
 ];
 const MAX_CHAT_SPACES = 8;
 
@@ -91,13 +93,28 @@ async function logEvent(env, line) {
 // ---------------------------------------------------------------- דיבור (טקסט לימות)
 
 // ניקוי טקסט כדי שימות יקריא אותו בלי לשבור את התחביר
+const HEB_MONTHS = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"];
+const HEB_ABBR = { 'ש"ח': "שקלים", 'ד"ר': "דוקטור", 'עו"ד': "עורך דין", 'רו"ח': "רואה חשבון", 'ת"ז': "תעודת זהות", 'ת"א': "תל אביב", 'ת.ד.': "תא דואר", 'ת.ז.': "תעודת זהות" };
+// הנקודה מפרידה משפטים בימות, והמירכאות והמקפים נמחקים, לכן תאריכים, מחירים, קיצורים וכתובות מתורגמים למילים לפני ההקראה
 function cleanForSpeech(s) {
   return String(s || "")
-    .replace(/\b(\d{1,2}):(\d{2})\b/g, (m, h, mm) => (mm === "00" ? h : mm === "30" ? `${h} וחצי` : mm === "15" ? `${h} ורבע` : `${h} ${mm}`))
+    .replace(/\b(re|fwd?|fw)\s*:/gi, " ") // Re: Fwd: בנושאים נקראים כמילים באנגלית
+    .replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, (m, y, mo, d) => (HEB_MONTHS[+mo - 1] ? `${+d} ב${HEB_MONTHS[+mo - 1]} ${y}` : m)) // תאריך ISO, אחרת הוא מאוית ספרה ספרה כמו טלפון
+    .replace(/\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b/g, (m, d, mo, y) => (HEB_MONTHS[+mo - 1] ? `${+d} ב${HEB_MONTHS[+mo - 1]} ${y}` : `${d} ${mo} ${y}`)) // 16.10.2026
+    .replace(/ש"ח|ד"ר|עו"ד|רו"ח|ת"ז|ת"א|ת\.ד\.|ת\.ז\./g, (m) => HEB_ABBR[m] || m)
+    .replace(/([\u05D0-\u05EA])["\u05F4]([\u05D0-\u05EA])/g, "$1$2") // מנכ"ל -> מנכל (אחרת המירכאות נמחקות ונשאר "מנכ ל")
+    .replace(/([\u05D0-\u05EA])\.([\u05D0-\u05EA])\.?/g, "$1$2") // ר.ת. -> רת
+    .replace(/(\d)\s*%/g, "$1 אחוז")
+    .replace(/₪\s*(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*(?:\.\d+)?)\s*₪/g, (m, a, b) => `${a || b} שקלים`)
+    .replace(/\$\s*(\d[\d,]*(?:\.\d+)?)/g, "$1 דולר").replace(/€\s*(\d[\d,]*(?:\.\d+)?)/g, "$1 יורו").replace(/[₪€£]/g, " ")
+    .replace(/(\d)\.(\d)/g, "$1 נקודה $2") // 3.5 -> "3 נקודה 5"
+    .replace(/\b(\d{1,2}):(\d{2})\b/g, (m, h, mm) => (mm === "00" ? String(+h) : mm === "30" ? `${+h} וחצי` : mm === "15" ? `${+h} ורבע` : `${+h} ו${+mm} דקות`))
+    .replace(/\u05BE/g, " ") // מקף עברי הוא מפריד מילים (הטווח של הניקוד למטה היה מוחק אותו ומדביק מילים)
     .replace(/\+?\d[\d\- ]{7,}\d/g, (m) => { const d = m.replace(/\D/g, ""); return d.length >= 9 ? " " + d.split("").join(" ") + " " : m; })
     .replace(/([\u05D0-\u05EA])['’]/g, "$1\u05F3")
     .replace(/https?:\/\/\S+|www\.\S+/gi, " קישור ")
     .replace(/\S+@\S+\.\S+/g, (m) => " " + m.split("@")[0].replace(/[._\-]/g, " ") + " ")
+    .replace(/\b([a-z][a-z0-9-]*(?:\.[a-z0-9-]+)+)\b/gi, (m) => m.replace(/\./g, " ")) // example.co.il -> example co il (לא שלושה משפטים)
     .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}\u{200E}\u{200F}\u{202A}-\u{202E}]/gu, " ")
     .replace(/[֑-ׇ]/g, ""); // ניקוד וטעמים
 }
@@ -127,7 +144,9 @@ const R = {
   note: (t) => `id_list_message=${sp(t, "m")}&`, // הודעת מצב קצרה: תמיד בקול המהיר
   menu: (st, prompt, allowed = "", max = 1) => {
     const v = nextVal(st);
-    return `read=${sp(prompt, "m")}=${v},no,${max},1,10,No,yes,no,,${allowed ? allowed + (globalThis.__noStar ? "" : ".*") : ""},,Ok,none,`;
+    // השדה השביעי (block_asterisk) חייב להיות no: אחרת ימות חוסמת את הכוכבית ומשמיעה "לא ניתן להקיש מקש כוכבית",
+    // והשמיעה החוזרת (כוכבית) לא מגיעה לקוד בכלל
+    return `read=${sp(prompt, "m")}=${v},no,${max},1,10,No,no,no,,${allowed ? allowed + (globalThis.__noStar ? "" : ".*") : ""},,Ok,none,`;
   },
   digits: (st, prompt, min, max) => {
     const v = nextVal(st);
@@ -135,7 +154,8 @@ const R = {
   },
   record: (st, prompt) => {
     const v = nextVal(st);
-    return `read=${sp(prompt, "m")}=${v},no,record,,,no,,,1,180`;
+    // בלי אורך מינימלי: סולמית מיד (בלי לומר כלום) היא הדרך לצאת מהעוזר ומקלאוד, ועם מינימום ימות הייתה דורשת הקלטה
+    return `read=${sp(prompt, "m")}=${v},no,record,,,no,,,,180`;
   },
   hangup: () => "go_to_folder=hangup",
 };
@@ -162,17 +182,19 @@ async function ym(env, method, params = {}) {
 const geminiBusy = new Map();
 const isBusy = (m) => (geminiBusy.get(m) || 0) > Date.now();
 const markBusy = (m, j) => { if (j?.error?.code === 429 || j?.error?.code === 503) geminiBusy.set(m, Date.now() + 60e3); };
-async function geminiCall(env, parts, maxTokens = 800) {
+async function geminiCall(env, parts, maxTokens = 800, deadline = Date.now() + 20000) {
   const all = (env.GEMINI_MODELS || "gemini-flash-lite-latest,gemini-flash-latest").split(",").map((s) => s.trim());
   const models = all.filter((m) => !isBusy(m)).concat(all.filter(isBusy));
   let last = "";
   for (const m of models) {
+    const left = deadline - Date.now();
+    if (left < 1500) { last = last || "timeout"; break; }
     try {
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${env.GEMINI_KEY}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { maxOutputTokens: maxTokens, temperature: 0.2 } }),
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(Math.min(15000, left)),
       });
       const j = await r.json();
       const out = j?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("").trim();
@@ -181,7 +203,7 @@ async function geminiCall(env, parts, maxTokens = 800) {
       markBusy(m, j);
       if (j?.error?.code === 429) bump(env, "quota");
       last = JSON.stringify(j).slice(0, 200);
-    } catch (e) { last = e.message; }
+    } catch (e) { last = e.message; if (e.name === "TimeoutError") geminiBusy.set(m, Date.now() + 60e3); }
   }
   throw new Error("gemini: " + last);
 }
@@ -221,7 +243,12 @@ ${hints ? `שמות של אנשים שהמשתמש מכיר ועשויים לה�
 תמלל את ההקלטה מילה במילה בעברית. אם נאמרה מילה באנגלית, כתוב אותה כמו שנאמרה. החזר רק את הטקסט שנאמר, בלי הקדמות. אם לא נאמר כלום, החזר מחרוזת ריקה.` },
         { inline_data: { mime_type: "audio/wav", data: b64(bytes) } },
       ], 1500);
-      if (t) return t.replace(/^["']|["']$/g, "").trim();
+      if (t) {
+        const out = t.replace(/^["']|["']$/g, "").trim();
+        // המודל לפעמים כותב במילים שלא נאמר כלום, במקום להחזיר ריק
+        if (/^[\(\[]?(שקט|אין דיבור|לא נאמר|לא נשמע|אין קול|רעש בלבד|ריק|מחרוזת ריקה|\(ריק\))/.test(out) || !/[\p{L}\p{N}]/u.test(out)) return "";
+        return out;
+      }
     } catch (e) { await logEvent(env, "שגיאת תמלול Gemini: " + e.message); }
   }
   bump(env, "cf");
@@ -245,8 +272,9 @@ const SPOKEN = "כתוב בעברית פשוטה, במשפטים קצרים שמ
 
 // האם הטקסט בעיקר בשפה זרה (לא עברית)
 function isForeign(t) {
-  const he = (String(t).match(/[א-ת]/g) || []).length;
-  const other = (String(t).match(/[A-Za-zÀ-ɏЀ-ӿ؀-ۿ]/g) || []).length;
+  t = String(t).slice(0, 1200); // ההתחלה מכריעה: הצהרה משפטית באנגלית בסוף מייל עברי לא הופכת אותו ל"אנגלי"
+  const he = (t.match(/[א-ת]/g) || []).length;
+  const other = (t.match(/[A-Za-zÀ-ɏЀ-ӿ؀-ۿ]/g) || []).length;
   return other >= 15 && other > he * 1.5;
 }
 // תרגום לעברית להקראה (עם מטמון). שמות באנגלית נכתבים באותיות עבריות.
@@ -282,8 +310,11 @@ async function saToken(env) {
   const sa = JSON.parse(env.GOOGLE_SA_KEY);
   const now = Math.floor(Date.now() / 1000);
   const enc = (o) => b64url(JSON.stringify(o));
+  // רשימת ההרשאות חייבת להתאים בדיוק למה שאושר למזהה הלקוח במסוף הניהול. ברירת המחדל מכסה מייל, צאט ואנשי קשר בלבד;
+  // ליומן, דרייב, משימות ומסמכים דרך חשבון שירות מגדירים DWD_SCOPES (מופרד בפסיקים) ומאשרים את אותה רשימה במסוף
+  const scopes = String(env.DWD_SCOPES || "").split(",").map((x) => x.trim()).filter(Boolean);
   const input = enc({ alg: "RS256", typ: "JWT" }) + "." + enc({
-    iss: sa.client_email, sub: env.BUSINESS_EMAIL, scope: DWD_SCOPES.join(" "),
+    iss: sa.client_email, sub: env.BUSINESS_EMAIL, scope: (scopes.length ? scopes : DWD_SCOPES).join(" "),
     aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600,
   });
   const der = Uint8Array.from(atob(sa.private_key.replace(/-----[^-]+-----|\s/g, "")), (c) => c.charCodeAt(0));
@@ -359,22 +390,24 @@ function htmlToText(h) {
     .replace(/<(style|script|head)[\s\S]*?<\/\1>/gi, " ")
     .replace(/<br\s*\/?>|<\/(p|div|tr|li|h\d)>/gi, "\n")
     .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/&(rsquo|lsquo|rdquo|ldquo|hellip|ndash|mdash|copy|trade|shy|zwnj|zwj|lrm|rlm);/g, (_, n) => ({ rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", hellip: "…", ndash: "–", mdash: "—", copy: "©", trade: "™" }[n] || ""))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(+n));
 }
 function bodyOf(payload) {
   let plain = "", htm = "";
   const walk = (p) => {
     if (!p) return;
     const cs = (p.headers || []).find((h) => h.name.toLowerCase() === "content-type")?.value?.match(/charset="?([\w-]+)/i)?.[1];
-    if (p.mimeType === "text/plain" && p.body?.data && !plain) plain = decodeBody(p.body.data, cs);
-    else if (p.mimeType === "text/html" && p.body?.data && !htm) htm = decodeBody(p.body.data, cs);
+    if (p.mimeType === "text/plain" && p.body?.data && !plain.trim()) plain = decodeBody(p.body.data, cs);
+    else if (p.mimeType === "text/html" && p.body?.data && !htm.trim()) htm = decodeBody(p.body.data, cs);
     (p.parts || []).forEach(walk);
   };
   walk(payload);
-  let t = plain || htmlToText(htm);
-  // הסרת ציטוט של מייל קודם
-  const cut = t.search(/\n\s*(On .{5,120}wrote:|ב.{3,120}נכתב:|ב.{3,120}כתב\/ה:|\u202b?בתאריך .{5,200}מאת .{3,120}:|-{3,}\s*Original Message|-{3,}\s*Forwarded message|From: .+\n.*(Sent|Date):)/i);
+  let t = plain.trim() ? plain : htmlToText(htm);
+  // הסרת ציטוט של מייל קודם (גם כותרות ציטוט בעברית של Gmail ו-Outlook)
+  const cut = t.search(/\n\s*(On .{5,120}wrote:|ב.{3,120}נכתב:|ב.{3,120}כתב\/ה:|\u202b?בתאריך .{5,200}מאת .{1,160}:|מאת: .+\n.*נשלח:|-{3,}\s*Original Message|-{3,}\s*Forwarded message|From: .+\n.*(Sent|Date):)/i);
   if (cut > 40) t = t.slice(0, cut);
   t = t.split("\n").filter((l) => !/^\s*>/.test(l)).join("\n");
   return t.replace(/\n{2,}/g, "\n").trim();
@@ -403,9 +436,11 @@ async function gmailGet(env, id) {
     attachments: countAttachments(m.payload),
   };
 }
+// תמונה משובצת (חתימה) ולא קובץ מצורף אמיתי: Content-Disposition inline + Content-ID
+const isInlineImage = (x) => /^image\//.test(x.mimeType || "") && (x.headers || []).some((h) => h.name.toLowerCase() === "content-id") && (x.headers || []).some((h) => h.name.toLowerCase() === "content-disposition" && /^\s*inline/i.test(h.value));
 function countAttachments(p) {
   let n = 0;
-  const walk = (x) => { if (!x) return; if (x.filename && x.body?.attachmentId) n++; (x.parts || []).forEach(walk); };
+  const walk = (x) => { if (!x) return; if (x.filename && x.body?.attachmentId && !isInlineImage(x)) n++; (x.parts || []).forEach(walk); };
   walk(p);
   return n;
 }
@@ -440,12 +475,17 @@ async function gmailSend(env, { to, subject, body, threadId, inReplyTo, refs, at
 async function myUserId(env) {
   let me = await env.KV.get("g:me");
   if (me) return me;
-  const mail = String(env.BUSINESS_EMAIL || "").toLowerCase();
-  const j = await gapi(env, `${G.people}people:searchDirectoryPeople?query=${encodeURIComponent(mail.split("@")[0])}&readMask=emailAddresses&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE`);
-  const people = j.people || [];
-  const p = people.find((x) => (x.emailAddresses || []).some((e) => String(e.value).toLowerCase() === mail)) || people[0];
-  me = String(p?.resourceName || "").replace("people/", "");
-  if (me) await env.KV.put("g:me", me);
+  // המזהה שלי בצאט (users/<id>) הוא מזהה האדם ב-People API. people/me הוא הדרך הבטוחה; חיפוש בספרייה רק כגיבוי
+  try { me = String((await gapi(env, `${G.people}people/me?personFields=names`)).resourceName || "").replace("people/", ""); } catch {}
+  if (!me) {
+    const mail = String(env.BUSINESS_EMAIL || "").toLowerCase();
+    const j = await gapi(env, `${G.people}people:searchDirectoryPeople?query=${encodeURIComponent(mail.split("@")[0])}&readMask=emailAddresses&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE`);
+    const people = j.people || [];
+    // רק התאמה מדויקת לפי הכתובת (people[0] יכול להיות אדם אחר עם קידומת דומה, ואז ההודעות שלי נקראות כחדשות)
+    const p = people.find((x) => (x.emailAddresses || []).some((e) => String(e.value).toLowerCase() === mail));
+    me = String(p?.resourceName || "").replace("people/", "");
+  }
+  if (me) await env.KV.put("g:me", me, { expirationTtl: 30 * 86400 });
   return me;
 }
 async function userName(env, userRes) {
@@ -468,6 +508,7 @@ async function contactBook(env) {
   const c = await kvJson(env, "contacts");
   if (c && Date.now() - c.t < 6 * 3600e3) return c.list;
   const list = [];
+  let failed = false;
   const add = (p, src) => {
     const name = p.names?.[0]?.displayName || "";
     for (const e of p.emailAddresses || []) if (e.value) list.push({ n: name || e.value.split("@")[0], e: e.value, s: src });
@@ -479,7 +520,7 @@ async function contactBook(env) {
       (j.connections || []).forEach((p) => add(p, "c"));
       if (!(tok = j.nextPageToken)) break;
     }
-  } catch {}
+  } catch (e) { failed = true; if (e instanceof NotConnected) throw e; }
   try {
     let tok = "";
     for (let i = 0; i < 3; i++) {
@@ -487,7 +528,7 @@ async function contactBook(env) {
       (j.people || []).forEach((p) => add(p, "d"));
       if (!(tok = j.nextPageToken)) break;
     }
-  } catch {}
+  } catch { failed = true; }
   try {
     let tok = "";
     for (let i = 0; i < 2; i++) {
@@ -495,10 +536,11 @@ async function contactBook(env) {
       (j.otherContacts || []).forEach((p) => add(p, "o"));
       if (!(tok = j.nextPageToken)) break;
     }
-  } catch {}
+  } catch { failed = true; }
   const seen = new Set();
   const dedup = list.filter((x) => { const k = x.e.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
-  await env.KV.put("contacts", JSON.stringify({ t: Date.now(), list: dedup }));
+  // רשימה ריקה בגלל תקלה זמנית לא נשמרת במטמון (אחרת שש שעות "לא מצאתי איש קשר")
+  if (dedup.length || !failed) await env.KV.put("contacts", JSON.stringify({ t: Date.now(), list: dedup }));
   return dedup;
 }
 
@@ -626,11 +668,12 @@ async function chatMarkRead(env, space) {
 async function chatSend(env, space, body) {
   return gapi(env, `${G.chat}${space}/messages`, { body: { text: body } });
 }
-async function chatDMSpace(env, email) {
+async function chatDMSpace(env, email, create = true) {
   try {
     const j = await gapi(env, `${G.chat}spaces:findDirectMessage?name=${encodeURIComponent("users/" + email)}`);
     if (j.name) return j.name;
   } catch (e) { if (e.status !== 404) throw e; }
+  if (!create) return ""; // חיפוש בלבד: לא פותחים שיחה חדשה בצאט רק כדי לקרוא
   const j = await gapi(env, `${G.chat}spaces:setup`, {
     body: { space: { spaceType: "DIRECT_MESSAGE" }, memberships: [{ member: { name: "users/" + email, type: "HUMAN" } }] },
   });
@@ -711,6 +754,15 @@ export class CallState {
       const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
       return new Response(JSON.stringify(await bridgeOp(st, path.slice(8), body)));
     }
+    if (path === "/claim") {
+      // נעילה אטומית של קלט: אם ימות שולחת את אותה בקשה פעמיים (למשל כשהתשובה מתעכבת), רק הראשונה מטופלת
+      const b = await req.json().catch(() => ({}));
+      const cur = await st.get("busy");
+      if (cur && cur.expect === b.expect && Date.now() - cur.at < BUSY_MS) return new Response(JSON.stringify({ ok: false }));
+      await st.put("busy", { expect: b.expect, at: Date.now() });
+      return new Response(JSON.stringify({ ok: true }));
+    }
+    if (path === "/busy") return new Response(JSON.stringify((await st.get("busy")) ?? null));
     if (path === "/startjob") {
       const b = await req.json();
       await st.put("pendingJob", b);
@@ -721,6 +773,7 @@ export class CallState {
     const key = path === "/job" ? "job" : "st";
     if (req.method === "PUT") {
       await st.put(key, await req.json());
+      if (key === "st") await st.delete("busy");
       if (!(await st.get("pendingJob"))) await st.setAlarm(Date.now() + 3 * 3600e3);
       return new Response("ok");
     }
@@ -733,8 +786,8 @@ export class CallState {
     if (pj) {
       await st.delete("pendingJob");
       let res;
-      try { res = await runMediaJob(this.env, pj.job); }
-      catch (e) { await logEvent(this.env, "שגיאה בהכנת מדיה: " + e.message); res = { kind: "say", text: "לא הצלחתי להכין את זה לשמיעה." }; }
+      try { res = await runJob(this.env, pj.job); }
+      catch (e) { await logEvent(this.env, "שגיאה במשימת רקע: " + e.message); res = { kind: "say", text: pj.job?.type === "ai" ? "הייתה תקלה. נסה שוב." : "לא הצלחתי להכין את זה לשמיעה." }; }
       await st.put("job", { id: pj.id, status: "done", ...res });
       await st.setAlarm(Date.now() + 3 * 3600e3);
       return;
@@ -758,6 +811,20 @@ async function loadState(env, callId) {
 async function saveState(env, callId, st) {
   if (env.CALLS) { await stub(env, callId).fetch("https://do/", { method: "PUT", body: JSON.stringify(st) }); return; }
   await env.KV.put("call:" + callId, JSON.stringify(st), { expirationTtl: 3 * 3600 });
+  await env.KV.delete("busy:" + callId).catch(() => {});
+}
+// נעילת קלט: true אם הבקשה הזו היא הראשונה שמטפלת בערך הזה (בלי DO, לבדיקות: KV)
+const BUSY_MS = 40e3;
+async function claimInput(env, callId, expect) {
+  if (env.CALLS) return (await (await stub(env, callId).fetch("https://do/claim", { method: "POST", body: JSON.stringify({ expect }) })).json()).ok;
+  const k = "busy:" + callId, cur = await kvJson(env, k);
+  if (cur && cur.expect === expect && Date.now() - cur.at < BUSY_MS) return false;
+  await env.KV.put(k, JSON.stringify({ expect, at: Date.now() }), { expirationTtl: 120 });
+  return true;
+}
+async function busyOf(env, callId) {
+  if (env.CALLS) return (await stub(env, callId).fetch("https://do/busy")).json();
+  return kvJson(env, "busy:" + callId);
 }
 async function dropState(env, callId) {
   if (env.CALLS) { await stub(env, callId).fetch("https://do/", { method: "DELETE" }).catch(() => {}); return; }
@@ -848,7 +915,7 @@ H.main = async (st, input, ctx, pre = "") => {
   if (input === undefined) {
     st.step = "main";
     st.mainN = (st.mainN || 0) + 1;
-    delete st.mail; delete st.conv;
+    delete st.mail; delete st.conv; delete st.share; delete st.cands; // הקשר של זרימה שנקטעה לא נגרר לזרימה הבאה
     return (pre ? R.msg(pre) : "") + R.menu(st, st.mainN > 1 ? MAIN_SHORT : MAIN_PROMPT, MAIN_KEYS);
   }
   if (input === "none") {
@@ -876,7 +943,7 @@ async function vipUnreadCount(env) {
 // נתוני מייל קצרים (שולח, תוויות) להרבה מיילים בבת אחת
 async function mailMeta(env, ids) {
   return Promise.all(ids.map((id) => gapi(env, `${G.gmail}messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=To`)
-    .then((x) => ({ id, from: parseAddr(header(x, "From")), subject: header(x, "Subject"), to: header(x, "To"), date: header(x, "Date"), labels: x.labelIds || [], snippet: x.snippet || "" })).catch(() => null)));
+    .then((x) => ({ id, threadId: x.threadId || "", from: parseAddr(header(x, "From")), subject: header(x, "Subject"), to: header(x, "To"), date: header(x, "Date"), labels: x.labelIds || [], snippet: x.snippet || "" })).catch(() => null)));
 }
 // מיון: אנשים חשובים קודם, אחר כך מה שגוגל סימן כחשוב, ואחר כך השאר
 async function sortImportant(env, ids) {
@@ -940,6 +1007,12 @@ async function buildMailQuery(env, spoken) {
     parts.push(`${j.sent ? "to" : "from"}:(${[...new Set(names)].join(" OR ")})`);
   }
   if (j.subject) parts.push(`(${String(j.subject).split(/\s+/).filter(Boolean).slice(0, 3).map((w) => `"${w}"`).join(" ")})`);
+  if (!j.person && !j.subject) {
+    // המודל לא חילץ כלום: מחפשים לפי המילים שנאמרו, במקום להחזיר 10 מיילים אקראיים
+    const stop = new Set(["המייל", "מייל", "מיילים", "של", "על", "את", "עם", "מה", "מי", "לי", "לא", "יש", "זה", "תמצא", "תחפש", "חפש", "מצא", "בבקשה", "אני", "רוצה", "לשמוע", "תשמיע", "שלח", "ששלח", "ששלחתי", "קיבלתי", "שקיבלתי"]);
+    const words = String(spoken).split(/\s+/).map((w) => w.replace(/[^\p{L}\p{N}]/gu, "")).filter((w) => w.length >= 3 && !stop.has(w)).slice(0, 5);
+    if (words.length) parts.push(`(${words.map((w) => `"${w}"`).join(" OR ")})`);
+  }
   parts.push(`newer_than:${Math.min(365, Math.max(1, +j.days || 60))}d`);
   if (j.sent) parts.push("in:sent");
   return parts.join(" ");
@@ -958,12 +1031,14 @@ H.unanswered = async (st, input, ctx) => {
   const env = ctx.env;
   const sent = await gmailIds(env, "in:sent newer_than:10d -subject:שש", 15);
   const meta = (await mailMeta(env, sent)).filter(Boolean);
-  const seen = new Set(), out = [];
-  for (const m of meta) {
-    const t = await gapi(env, `${G.gmail}messages/${m.id}?format=metadata&metadataHeaders=From`).then((x) => x.threadId).catch(() => "");
-    if (!t || seen.has(t)) continue;
-    seen.add(t);
-    const th = await gapi(env, `${G.gmail}threads/${t}?format=metadata&metadataHeaders=From`).catch(() => null);
+  const seen = new Set(), picks = [];
+  for (const m of meta) if (m.threadId && !seen.has(m.threadId)) { seen.add(m.threadId); picks.push(m); }
+  // כל השרשורים במקביל (לא 30 קריאות אחת אחרי השנייה, שימות לא מחכה להן)
+  const threads = await Promise.all(picks.map((m) => gapi(env, `${G.gmail}threads/${m.threadId}?format=metadata&metadataHeaders=From`).then((th) => ({ m, th })).catch(() => null)));
+  const out = [];
+  for (const x of threads) {
+    if (!x) continue;
+    const { m, th } = x;
     const last = th?.messages?.[th.messages.length - 1];
     if (!last) continue;
     const fromMe = parseAddr(header(last, "From")).email.toLowerCase() === String(env.BUSINESS_EMAIL).toLowerCase();
@@ -978,10 +1053,23 @@ H.unanswered = async (st, input, ctx) => {
 H.mailItem = async (st, input, ctx) => {
   const m = st.mail;
   if (m.i >= m.ids.length) { delete st.cur; return go(st, "main", undefined, ctx, `סיימת את ${m.name || "המיילים"}.`); }
-  const e = await gmailGet(ctx.env, m.ids[m.i]);
-  st.cur = { id: e.id, threadId: e.threadId, fromName: e.fromName, fromEmail: e.fromEmail, replyTo: e.replyTo, subject: e.subject, msgId: e.msgId, refs: trimText(e.refs, 900), body: e.body, to: e.to, nAtt: e.attachments, date: e.date };
+  let e;
+  try { e = await gmailGet(ctx.env, m.ids[m.i]); }
+  catch (err) {
+    if (err instanceof NotConnected) throw err;
+    // מייל שנמחק או לא נגיש בינתיים: מדלגים עליו במקום להפיל את כל הרשימה ("אירעה תקלה")
+    await logEvent(ctx.env, "דילוג על מייל שלא ניתן לקרוא: " + err.message);
+    m.i++;
+    return go(st, "mailItem", undefined, ctx);
+  }
+  st.cur = { id: e.id, threadId: e.threadId, fromName: e.fromName, fromEmail: e.fromEmail, replyTo: e.replyTo, subject: e.subject, msgId: e.msgId, refs: lastRefs(e.refs), body: e.body, to: e.to, nAtt: e.attachments, date: e.date };
   const att = e.attachments ? ` יש ${e.attachments === 1 ? "קובץ מצורף אחד" : e.attachments + " קבצים מצורפים"}.` : "";
   const sentByMe = m.cat === "unanswered";
+  if (sentByMe) {
+    // מייל ששלחתי: "הצד השני" הוא הנמען, ותשובה הולכת אליו (ולא אליי)
+    const p = parseAddr(e.to);
+    st.cur.fromName = p.name; st.cur.fromEmail = p.email; st.cur.replyTo = e.to || e.replyTo;
+  }
   let head = sentByMe ? `אל: ${parseAddr(e.to).name}\nנושא: ${e.subject}\nתוכן: ${trimText(e.body, 350)}` : `מאת: ${e.fromName}\nנושא: ${e.subject}\nתוכן: ${trimText(e.body, 350)}`;
   const foreign = isForeign(e.subject + " " + e.body);
   if (foreign) head = await toHebrew(ctx.env, head, 600);
@@ -992,10 +1080,14 @@ H.mailItem = async (st, input, ctx) => {
   st.step = "mailMenu";
   return R.msg(intro) + R.menu(st, MAIL_MENU, MAIL_KEYS);
 };
+// References תקין: רק מזהים שלמים (חיתוך באמצע מזהה שובר את השרשור אצל הנמען)
+const lastRefs = (r) => String(r || "").trim().split(/\s+/).filter(Boolean).slice(-12).join(" ");
 function relDate(d) {
   const t = Date.parse(d);
   if (!t) return "";
-  const days = Math.floor((Date.now() - t) / 86400e3);
+  // לפי ימים בלוח (שעון ישראל): מייל מאתמול בלילה הוא "אתמול", לא "היום"
+  const dayOf = (ms) => Date.parse(new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)));
+  const days = Math.round((dayOf(Date.now()) - dayOf(t)) / 86400e3);
   return days <= 0 ? "היום" : days === 1 ? "אתמול" : days < 7 ? `לפני ${days} ימים` : days < 14 ? "לפני שבוע" : days < 60 ? `לפני ${Math.round(days / 7)} שבועות` : "לפני יותר מחודשיים";
 }
 // הקראה מלאה בעמודים: כל עמוד עד 1500 תווים, ואפשר לדלג בלחיצה
@@ -1089,8 +1181,9 @@ H.saveSender = async (st, input, ctx) => {
 function snoozeUntil(opt) {
   const now = new Date();
   const il = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Jerusalem" }));
-  const offMs = now - il; // ההפרש בין UTC לשעון ישראל
-  const at = (dayAdd, h) => { const d = new Date(il); d.setDate(d.getDate() + dayAdd); d.setHours(h, 0, 0, 0); return d.getTime() + offMs; };
+  // ההפרש בין UTC לשעון ישראל נמדד בזמן היעד (לא עכשיו), כדי שדחייה שחוצה מעבר לשעון קיץ/חורף תגיע בשעה הנכונה
+  const offAt = (wall) => { const m = ilOffset(new Date(wall)).match(/([+-])(\d{2}):(\d{2})/); return m ? (m[1] === "-" ? -1 : 1) * (+m[2] * 60 + +m[3]) * 60e3 : il - now; };
+  const at = (dayAdd, h) => { const d = new Date(il); d.setDate(d.getDate() + dayAdd); d.setHours(h, 0, 0, 0); return d.getTime() - offAt(d.getTime()); };
   if (opt === "1") return at(1, 8);
   if (opt === "2") return il.getHours() < 19 ? at(0, 19) : at(1, 19);
   if (opt === "3") return Date.now() + 3 * 3600e3;
@@ -1114,15 +1207,28 @@ H.snoozePick = async (st, input, ctx) => {
 async function restoreSnoozed(env) {
   const list = await kvJson(env, "snooze", []);
   if (!list.length) return;
-  const due = list.filter((x) => x.until <= Date.now()), rest = list.filter((x) => x.until > Date.now());
-  for (const x of due) await modifyEmail(env, x.id, ["INBOX", "UNREAD"], [x.lid]).catch((e) => logEvent(env, "החזרת מייל נדחה נכשלה: " + e.message));
+  const now = Date.now();
+  const due = list.filter((x) => x.until <= now), rest = list.filter((x) => x.until > now);
+  for (const x of due) {
+    try { await modifyEmail(env, x.id, ["INBOX", "UNREAD"], [x.lid]); }
+    catch (e) {
+      await logEvent(env, "החזרת מייל נדחה נכשלה: " + e.message);
+      // תקלה זמנית: מנסים שוב בבדיקה הבאה (עד 3 ימים), כדי שהמייל לא יישאר מוסתר לתמיד
+      if (e.status !== 404 && now - x.until < 3 * 86400e3) rest.push(x);
+    }
+  }
   if (due.length) await env.KV.put("snooze", JSON.stringify(rest));
 }
 // שמירת מייל כמסמך גוגל בתיקייה "מיילים מהקו"
 async function driveFolder(env, name) {
   const k = "folder:" + name;
   const c = await env.KV.get(k);
-  if (c) return c;
+  if (c) {
+    // התיקייה עדיין קיימת? (תיקייה שנמחקה הייתה מפילה כל שמירה לדרייב לתמיד)
+    const f = await gapi(env, `${DRIVE}files/${c}?fields=id,trashed`).catch((e) => (e.status === 404 ? null : { id: c }));
+    if (f && !f.trashed) return c;
+    await env.KV.delete(k).catch(() => {});
+  }
   const q = `name='${name.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   const j = await gapi(env, `${DRIVE}files?q=${encodeURIComponent(q)}&fields=files(id)`);
   let id = j.files?.[0]?.id;
@@ -1221,9 +1327,9 @@ H.attList = async (st, input, ctx) => {
 H.attMenu = async (st, input, ctx) => {
   const env = ctx.env, c = st.cur, a = st.att;
   if (input === "1" || input === "2") {
-    const t = await ACTIONS.read_attachment.run(env, { id: c.id, index: a.index, mode: input === "2" ? "full" : "summary" }).catch(() => "לא הצלחתי לקרוא את הקובץ.");
-    st.media = { back: "mail", pages: chunkText(t, 2000), page: 0 };
-    return go(st, "mediaText", undefined, ctx);
+    // הקריאה רצה ברקע עם מנגינת המתנה: קובץ גדול לוקח יותר זמן ממה שימות מחכה לתשובה
+    st.media = { back: "mail" };
+    return startMediaJob(ctx, st, { type: "action", name: "read_attachment", args: { id: c.id, index: a.index, mode: input === "2" ? "full" : "summary" } });
   }
   if (input === "3") { st.share = { src: { type: "gmail", mailId: c.id, attId: a.id, name: a.name, mime: a.mime, size: a.size }, back: "mail" }; return go(st, "shareWho", undefined, ctx); }
   if (input === "4") {
@@ -1315,7 +1421,7 @@ async function openConv(st, ctx, sp, filter = "", n = 8) {
   for (const m of msgs) m.n = m.mine ? "אתה" : names[m.u] || (await userName(ctx.env, m.u));
   if (sp.dm && !sp.title) sp.title = Object.entries(names).find(([u]) => u !== "users/" + me)?.[1] || "איש קשר";
   st.conv = { items: [{ ...sp, msgs, recent: true }], i: 0, kind: sp.dm ? "dm" : "group" };
-  if (st.share?.fromChat) {
+  if (st.share?.fromChat && st.share.back === "files") {
     delete st.share.fromChat;
     const atts = msgs.flatMap((m) => (m.atts || []).map((a) => ({ ...a, from: m.n })));
     if (!atts.length) return go(st, "filesMenu", undefined, ctx, "לא נשלחו קבצים בהודעות האחרונות של השיחה.");
@@ -1515,8 +1621,9 @@ H.chatSearchPick = async (st, input, ctx) => {
   const c = st.chatCands?.[+input - 1];
   if (!c) return go(st, "main", undefined, ctx);
   if (c.dm) {
-    let space;
-    try { space = await chatDMSpace(ctx.env, c.email); } catch { return go(st, "main", undefined, ctx, `אין שיחה בצאט עם ${c.title}.`); }
+    let space = "";
+    try { space = await chatDMSpace(ctx.env, c.email, false); } catch {}
+    if (!space) return go(st, "main", undefined, ctx, `אין שיחה בצאט עם ${c.title}.`);
     return openConv(st, ctx, { space, dm: true, title: c.title }, st.chatKeyword);
   }
   return openConv(st, ctx, { space: c.space, dm: false, title: c.title }, st.chatKeyword);
@@ -1686,9 +1793,10 @@ async function chatSendAudio(env, space, bytes, caption = "") {
   const raw = await r.text();
   let j = {};
   try { j = JSON.parse(raw); } catch {}
-  const token = j.attachmentUploadToken || j.attachment_upload_token || j.uploadedAttachment?.attachmentUploadToken;
-  if (!r.ok || !token) throw new Error("chat upload " + r.status + " " + trimText(raw, 200));
-  return gapi(env, `${G.chat}${space}/messages`, { body: { text: caption ? "🎤 " + caption : "🎤 הודעה קולית", attachment: [{ attachmentUploadToken: token }] } });
+  // התשובה של media.upload היא { attachmentDataRef: { attachmentUploadToken } }, וכך גם צריך לצרף להודעה
+  const tok = j.attachmentDataRef?.attachmentUploadToken || j.attachmentUploadToken || j.attachment_upload_token || j.uploadedAttachment?.attachmentUploadToken;
+  if (!r.ok || !tok) throw new Error("chat upload " + r.status + " " + trimText(raw, 200));
+  return gapi(env, `${G.chat}${space}/messages`, { body: { text: caption ? "🎤 " + caption : "🎤 הודעה קולית", attachment: [{ attachmentDataRef: { attachmentUploadToken: tok } }] } });
 }
 
 // ---- סיכום
@@ -1801,8 +1909,9 @@ const LOOKUP = {
     desc: "אירועים ביומן בטווח תאריכים: מזהה, כותרת, התחלה, סיום ומיקום.",
     params: { from: ["STRING", "תאריך התחלה YYYY-MM-DD"], to: ["STRING", "תאריך סיום YYYY-MM-DD (כולל)"] }, req: ["from", "to"],
     async run(env, a) {
-      const off = ilOffset();
-      const j = await gapi(env, `${CAL}events?singleEvents=true&orderBy=startTime&maxResults=25&timeMin=${encodeURIComponent(a.from + "T00:00:00" + off)}&timeMax=${encodeURIComponent(a.to + "T23:59:59" + off)}`);
+      // ההפרש משעון UTC לפי התאריך המבוקש (שעון קיץ/חורף), לא לפי היום
+      const offFrom = ilOffset(new Date(a.from + "T12:00:00Z")), offTo = ilOffset(new Date(a.to + "T12:00:00Z"));
+      const j = await gapi(env, `${CAL}events?singleEvents=true&orderBy=startTime&maxResults=25&timeMin=${encodeURIComponent(a.from + "T00:00:00" + offFrom)}&timeMax=${encodeURIComponent(a.to + "T23:59:59" + offTo)}`);
       return (j.items || []).map((e) => ({ id: e.id, title: e.summary || "", start: e.start?.dateTime || e.start?.date, end: e.end?.dateTime || e.end?.date, location: e.location || "" }));
     },
   },
@@ -1819,6 +1928,8 @@ const LOOKUP = {
 };
 
 // ---- פעולות (מחכות לאישור). twice = פעולה בלתי הפיכה, אישור כפול
+// שגיאה "רכה" מ-describe: חסר פרט או אין תוצאות. חוזרת למודל כתשובת כלי כדי שישאל או יסביר, במקום "לא מצאתי"
+const soft = (msg) => Object.assign(new Error(msg), { soft: true });
 const ACTIONS = {
   play_email: {
     desc: "השמעת מייל מלא למשתמש (מתורגם לעברית אם הוא בשפה אחרת).",
@@ -1889,6 +2000,7 @@ const ACTIONS = {
     twice: true, desc: "שליחת הודעה בצאט: לשיחה קיימת (space) או לאדם לפי כתובת מייל (to_email, שמוצאים עם search_contacts).",
     params: { space: ["STRING", "מזהה שיחה קיימת, אם יש"], to_email: ["STRING", "כתובת מייל של אדם, אם אין מזהה שיחה"], text: ["STRING", "תוכן ההודעה"] }, req: ["text"],
     async describe(env, a) {
+      if (!a.space && !a.to_email) throw soft("חסר נמען: צריך מזהה שיחה (space) או כתובת מייל של האדם (to_email).");
       const who = a.space ? await chatTitle(env, a.space) : await nameForEmail(env, a.to_email);
       return `לשלוח הודעה בצאט אל ${await heb(env, who)}. תוכן ההודעה: ${a.text}`;
     },
@@ -2005,25 +2117,41 @@ Object.assign(ACTIONS, {
     async run(env, a) {
       const e = await gmailGet(env, a.id);
       const raw = await gapi(env, `${G.gmail}messages/${a.id}?format=raw`);
-      const original = new TextDecoder().decode(unb64url(raw.raw));
+      const original = unb64url(raw.raw); // נשאר בייטים: מייל מקורי בקידוד windows-1255 היה נהרס במעבר דרך מחרוזת UTF-8
       const b = "fwd" + randKey(16);
       const subject = /^(fwd?|הועבר)\s*:/i.test(e.subject) ? e.subject : "Fwd: " + e.subject;
-      const msg = [`To: ${a.to}`, `Subject: ${encHeader(subject)}`, "MIME-Version: 1.0", `Content-Type: multipart/mixed; boundary="${b}"`, "",
+      const head = new TextEncoder().encode([`To: ${a.to}`, `Subject: ${encHeader(subject)}`, "MIME-Version: 1.0", `Content-Type: multipart/mixed; boundary="${b}"`, "",
         `--${b}`, 'Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: base64", "", utf8b64(a.note || "מצורף מייל שהועבר.").replace(/(.{76})/g, "$1\r\n"),
-        `--${b}`, "Content-Type: message/rfc822", 'Content-Disposition: attachment; filename="forwarded.eml"', "", original, `--${b}--`, ""].join("\r\n");
-      await gapi(env, `${G.gmail}messages/send`, { body: { raw: b64url(msg) } });
+        `--${b}`, "Content-Type: message/rfc822", 'Content-Disposition: attachment; filename="forwarded.eml"', "", ""].join("\r\n"));
+      const tail = new TextEncoder().encode(`\r\n--${b}--\r\n`);
+      const msg = new Uint8Array(head.length + original.length + tail.length);
+      msg.set(head); msg.set(original, head.length); msg.set(tail, head.length + original.length);
+      if (msg.length > 4e6) {
+        // מייל גדול (קבצים מצורפים): העלאת הבייטים ישירות, לא דרך JSON (שמוגבל לכמה מגה)
+        const r = await fetch("https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media", { method: "POST", headers: { Authorization: "Bearer " + (await accessToken(env)), "Content-Type": "message/rfc822" }, body: msg });
+        if (!r.ok) throw new Error("gmail upload " + r.status + " " + ((await r.json().catch(() => ({}))).error?.message || ""));
+      } else await gapi(env, `${G.gmail}messages/send`, { body: { raw: b64(msg).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") } });
       return "המייל הועבר.";
     },
   },
   set_auto_reply: {
     twice: true, desc: "הפעלה או כיבוי של מענה אוטומטי במייל (למשל בזמן היעדרות). כשמפעילים, כל מי ששולח מייל יקבל את ההודעה.",
     params: { on: ["BOOLEAN", "true להפעלה, false לכיבוי"], subject: ["STRING", "נושא ההודעה האוטומטית"], message: ["STRING", "תוכן ההודעה האוטומטית"], until: ["STRING", "עד איזה תאריך YYYY-MM-DD (לא חובה)"] }, req: ["on"],
-    async describe(env, a) { return a.on ? `להפעיל מענה אוטומטי במייל${a.until ? ` עד ${a.until}` : ""}, עם ההודעה: ${a.message || ""}` : "לכבות את המענה האוטומטי במייל"; },
+    async describe(env, a) {
+      if (a.on && !String(a.message || "").trim()) throw soft("חסר תוכן להודעה האוטומטית. שאל את המשתמש מה לכתוב.");
+      return a.on ? `להפעיל מענה אוטומטי במייל${a.until ? ` עד ${a.until}` : ""}, עם ההודעה: ${a.message || ""}` : "לכבות את המענה האוטומטי במייל";
+    },
     async run(env, a) {
-      const body = { enableAutoReply: !!a.on, responseSubject: a.subject || "", responseBodyPlainText: a.message || "", restrictToContacts: false, restrictToDomain: false };
-      if (a.on && a.until) body.endTime = String(Date.parse(a.until + "T23:59:59" + ilOffset()));
+      if (!a.on) {
+        // כיבוי: שומרים את הנוסח הקיים (PUT מחליף את כל ההגדרה)
+        const cur = await gapi(env, `${G.gmail}settings/vacation`).catch(() => ({}));
+        await gapi(env, `${G.gmail}settings/vacation`, { method: "PUT", body: { ...cur, enableAutoReply: false } });
+        return "המענה האוטומטי כובה.";
+      }
+      const body = { enableAutoReply: true, responseSubject: a.subject || "", responseBodyPlainText: a.message || "", restrictToContacts: false, restrictToDomain: false };
+      if (a.until) body.endTime = String(Date.parse(a.until + "T23:59:59" + ilOffset(new Date(a.until + "T12:00:00Z"))));
       await gapi(env, `${G.gmail}settings/vacation`, { method: "PUT", body });
-      return a.on ? "המענה האוטומטי הופעל." : "המענה האוטומטי כובה.";
+      return "המענה האוטומטי הופעל.";
     },
   },
   add_task: {
@@ -2064,7 +2192,7 @@ Object.assign(ACTIONS, {
     async run(env, a) {
       const d = await gapi(env, DOCS, { body: { title: a.title } });
       await gapi(env, `${DOCS}/${d.documentId}:batchUpdate`, { body: { requests: [{ insertText: { location: { index: 1 }, text: a.text } }] } });
-      return `המסמך נוצר. מזהה המסמך ${d.documentId}`;
+      return { say: "המסמך נוצר בדרייב.", mem: `מזהה המסמך: ${d.documentId}` };
     },
   },
   append_to_doc: {
@@ -2118,6 +2246,13 @@ Object.assign(ACTIONS, {
       const dt = (s) => ({ dateTime: s.length === 16 ? s + ":00" : s, timeZone: "Asia/Jerusalem" });
       if (a.start) p.start = dt(a.start);
       if (a.end) p.end = dt(a.end);
+      if (a.start && !a.end) {
+        // רק שעת התחלה חדשה: שומרים על אורך האירוע, אחרת גוגל דוחה התחלה שאחרי הסיום הישן
+        const e = await gapi(env, `${CAL}events/${a.id}`);
+        const dur = Date.parse(e.end?.dateTime || "") - Date.parse(e.start?.dateTime || "");
+        const startMs = Date.parse(p.start.dateTime + ilOffset(new Date(p.start.dateTime + "Z")));
+        if (dur > 0 && startMs) p.end = { dateTime: new Date(startMs + dur).toISOString(), timeZone: "Asia/Jerusalem" };
+      }
       await gapi(env, `${CAL}events/${a.id}?sendUpdates=all`, { method: "PATCH", body: p });
       return "האירוע עודכן.";
     },
@@ -2125,7 +2260,7 @@ Object.assign(ACTIONS, {
   create_meet: {
     desc: "יצירת קישור לפגישת Google Meet חדשה (אפשר אחר כך לשלוח אותו במייל או בצאט).", params: {}, req: [],
     async describe() { return "ליצור קישור לפגישת מיט חדשה"; },
-    async run(env) { const m = await gapi(env, "https://meet.googleapis.com/v2/spaces", { body: {} }); return `נוצר קישור לפגישה. הקישור ${m.meetingUri}`; },
+    async run(env) { const m = await gapi(env, "https://meet.googleapis.com/v2/spaces", { body: {} }); return { say: "נוצר קישור לפגישת מיט. אפשר לבקש ממני לשלוח אותו במייל או בצאט.", mem: `הקישור: ${m.meetingUri}` }; },
   },
 });
 
@@ -2139,11 +2274,12 @@ async function gmailIds(env, q, max = 500) {
   }
   return ids.slice(0, max);
 }
+const BULK_MAX = 5000; // פעולות על הרבה מיילים: עד כאן בבת אחת (ולא 500 בשקט כאילו זה הכל)
 const batchModify = (env, ids, add = [], remove = []) => gapi(env, `${G.gmail}messages/batchModify`, { body: { ids, addLabelIds: add, removeLabelIds: remove } });
 const countWord = (n, one, many) => (n === 1 ? one : `${n} ${many}`);
 function attachmentsOf(payload) {
   const out = [];
-  const walk = (p) => { if (!p) return; if (p.filename && p.body?.attachmentId) out.push({ name: p.filename, mime: p.mimeType, id: p.body.attachmentId, size: p.body.size || 0 }); (p.parts || []).forEach(walk); };
+  const walk = (p) => { if (!p) return; if (p.filename && p.body?.attachmentId && !isInlineImage(p)) out.push({ name: p.filename, mime: p.mimeType, id: p.body.attachmentId, size: p.body.size || 0 }); (p.parts || []).forEach(walk); };
   walk(payload);
   return out;
 }
@@ -2153,7 +2289,7 @@ Object.assign(LOOKUP, {
     desc: "חיפוש סרטונים ביוטיוב. מחזיר מזהה, כותרת, ערוץ ואורך.",
     params: { query: ["STRING", "מה לחפש"] }, req: ["query"],
     async run(env, a) {
-      const j = await gapi(env, `${YT_API}search?part=snippet&type=video&maxResults=6&q=${encodeURIComponent(a.query)}`);
+      const j = await ytGet(env, `search?part=snippet&type=video&maxResults=6&q=${encodeURIComponent(a.query)}`);
       const ids = (j.items || []).map((v) => v.id?.videoId).filter(Boolean);
       const info = await ytTitles(env, ids);
       return ids.map((id) => ({ id, title: info[id]?.title || "", channel: info[id]?.channel || "", length: ytDur(info[id]?.dur || "") }));
@@ -2235,20 +2371,20 @@ Object.assign(ACTIONS, {
   mark_all_read: {
     desc: "סימון הרבה מיילים כנקראו בבת אחת לפי חיפוש (למשל כל העדכונים: is:unread category:updates).",
     params: { query: ["STRING", "שאילתת חיפוש בתחביר Gmail"] }, req: ["query"],
-    async describe(env, a) { const n = (await gmailIds(env, a.query + " is:unread")).length; if (!n) throw new Error("אין"); return `לסמן כנקראו ${countWord(n, "מייל אחד", "מיילים")} לפי החיפוש ${a.query}`; },
-    async run(env, a) { const ids = await gmailIds(env, a.query + " is:unread"); for (let i = 0; i < ids.length; i += 1000) await batchModify(env, ids.slice(i, i + 1000), [], ["UNREAD"]); return `${countWord(ids.length, "מייל אחד סומן", "מיילים סומנו")} כנקראו.`; },
+    async describe(env, a) { const n = (await gmailIds(env, a.query + " is:unread", BULK_MAX)).length; if (!n) throw soft("אין מיילים שלא נקראו שמתאימים לחיפוש הזה."); return `לסמן כנקראו ${countWord(n, "מייל אחד", "מיילים")}${n >= BULK_MAX ? " (החלק הראשון)" : ""} לפי החיפוש ${a.query}`; },
+    async run(env, a) { const ids = await gmailIds(env, a.query + " is:unread", BULK_MAX); for (let i = 0; i < ids.length; i += 1000) await batchModify(env, ids.slice(i, i + 1000), [], ["UNREAD"]); return `${countWord(ids.length, "מייל אחד סומן", "מיילים סומנו")} כנקראו.`; },
   },
   archive_many: {
     desc: "העברת הרבה מיילים לארכיון בבת אחת לפי חיפוש.",
     params: { query: ["STRING", "שאילתת חיפוש בתחביר Gmail"] }, req: ["query"],
-    async describe(env, a) { const n = (await gmailIds(env, a.query + " in:inbox")).length; if (!n) throw new Error("אין"); return `להעביר לארכיון ${countWord(n, "מייל אחד", "מיילים")} לפי החיפוש ${a.query}`; },
-    async run(env, a) { const ids = await gmailIds(env, a.query + " in:inbox"); for (let i = 0; i < ids.length; i += 1000) await batchModify(env, ids.slice(i, i + 1000), [], ["INBOX"]); return `${countWord(ids.length, "מייל אחד הועבר", "מיילים הועברו")} לארכיון.`; },
+    async describe(env, a) { const n = (await gmailIds(env, a.query + " in:inbox", BULK_MAX)).length; if (!n) throw soft("אין מיילים בתיבה שמתאימים לחיפוש הזה."); return `להעביר לארכיון ${countWord(n, "מייל אחד", "מיילים")}${n >= BULK_MAX ? " (החלק הראשון)" : ""} לפי החיפוש ${a.query}`; },
+    async run(env, a) { const ids = await gmailIds(env, a.query + " in:inbox", BULK_MAX); for (let i = 0; i < ids.length; i += 1000) await batchModify(env, ids.slice(i, i + 1000), [], ["INBOX"]); return `${countWord(ids.length, "מייל אחד הועבר", "מיילים הועברו")} לארכיון.`; },
   },
   trash_many: {
     twice: true, desc: "מחיקת הרבה מיילים בבת אחת לפי חיפוש (העברה לאשפה).",
     params: { query: ["STRING", "שאילתת חיפוש בתחביר Gmail"] }, req: ["query"],
-    async describe(env, a) { const n = (await gmailIds(env, a.query)).length; if (!n) throw new Error("אין"); return `למחוק ${countWord(n, "מייל אחד", "מיילים")} לפי החיפוש ${a.query}`; },
-    async run(env, a) { const ids = await gmailIds(env, a.query); for (let i = 0; i < ids.length; i += 1000) await batchModify(env, ids.slice(i, i + 1000), ["TRASH"], ["INBOX"]); return `${countWord(ids.length, "מייל אחד נמחק", "מיילים נמחקו")}.`; },
+    async describe(env, a) { const n = (await gmailIds(env, a.query, BULK_MAX)).length; if (!n) throw soft("אין מיילים שמתאימים לחיפוש הזה."); return `למחוק ${countWord(n, "מייל אחד", "מיילים")}${n >= BULK_MAX ? " (החלק הראשון)" : ""} לפי החיפוש ${a.query}`; },
+    async run(env, a) { const ids = await gmailIds(env, a.query, BULK_MAX); for (let i = 0; i < ids.length; i += 1000) await batchModify(env, ids.slice(i, i + 1000), ["TRASH"], ["INBOX"]); return `${countWord(ids.length, "מייל אחד נמחק", "מיילים נמחקו")}.`; },
   },
   read_attachment: {
     desc: "הקראה או סיכום של קובץ מצורף למייל (PDF, תמונה, מסמך טקסט). את מספר הקובץ לוקחים מ-list_attachments.",
@@ -2256,7 +2392,7 @@ Object.assign(ACTIONS, {
     async describe(env, a) {
       const m = await gapi(env, `${G.gmail}messages/${a.id}?format=full`);
       const att = attachmentsOf(m.payload)[(+a.index || 1) - 1];
-      if (!att) throw new Error("אין קובץ");
+      if (!att) throw soft("אין קובץ מצורף במספר הזה. בדוק עם list_attachments.");
       return `${a.mode === "full" ? "להקריא" : "לסכם"} את הקובץ המצורף ${await heb(env, att.name)}`;
     },
     async run(env, a) {
@@ -2271,7 +2407,7 @@ Object.assign(ACTIONS, {
       return geminiCall(env, [
         { text: (a.mode === "full" ? "הקרא בעברית את התוכן של הקובץ, בצורה ברורה לשמיעה בטלפון. אם הוא בשפה אחרת, תרגם לעברית. " : "סכם בעברית את הקובץ: במה מדובר, הפרטים החשובים (סכומים, תאריכים, שמות), ומה מבקשים ממני. ") + SPOKEN },
         { inline_data: { mime_type: mime, data } },
-      ], 2000);
+      ], 2000, Date.now() + 90000); // רץ ברקע (משימת DO), לכן מותר לו יותר זמן מקריאה רגילה
     },
   },
   create_draft: {
@@ -2319,7 +2455,7 @@ Object.assign(ACTIONS, {
   delete_note: {
     desc: "מחיקת פתק שמור. את המזהה לוקחים מ-list_notes.",
     params: { id: ["STRING", "מזהה הפתק"] }, req: ["id"],
-    async describe(env, a) { const n = (await kvJson(env, "notes", [])).find((x) => x.id === a.id); if (!n) throw new Error("אין"); return `למחוק את הפתק: ${n.t}`; },
+    async describe(env, a) { const n = (await kvJson(env, "notes", [])).find((x) => x.id === a.id); if (!n) throw soft("אין פתק עם המזהה הזה. בדוק עם list_notes."); return `למחוק את הפתק: ${n.t}`; },
     async run(env, a) { const n = await kvJson(env, "notes", []); await env.KV.put("notes", JSON.stringify(n.filter((x) => x.id !== a.id))); return "הפתק נמחק."; },
   },
 });
@@ -2342,11 +2478,14 @@ function toolDecls() {
   return [ASK_CHOICE].concat(Object.entries(all).map(([name, t]) => ({
     name,
     description: (ACTIONS[name] ? "[פעולה שדורשת אישור מהמשתמש] " : "[חיפוש] ") + t.desc,
-    parameters: {
-      type: "OBJECT",
-      properties: Object.fromEntries(Object.entries(t.params).map(([k, [type, description]]) => [k, { type, description }])),
-      required: t.req,
-    },
+    // כלי בלי פרמטרים נשלח בלי parameters: סכמת OBJECT עם properties ריק נדחית על ידי Gemini (400) ומפילה את כל השיחה
+    ...(Object.keys(t.params).length ? {
+      parameters: {
+        type: "OBJECT",
+        properties: Object.fromEntries(Object.entries(t.params).map(([k, [type, description]]) => [k, { type, description }])),
+        required: t.req,
+      },
+    } : {}),
   })));
 }
 
@@ -2372,17 +2511,19 @@ function aiSystem(env, mem = "") {
 - אם המשתמש ביקש לבטל, לא לבצע, או לחזור, פשוט ענה בקצרה.`;
 }
 
-async function geminiTools(env, sys, contents) {
+async function geminiTools(env, sys, contents, deadline = Date.now() + 30000) {
   const all = (env.AGENT_MODELS || "gemini-3.8-flash,gemini-flash-latest,gemini-flash-lite-latest").split(",").map((s) => s.trim());
   const models = all.filter((m) => !isBusy(m)).concat(all.filter(isBusy));
   let last = "";
   for (const m of models) {
+    const left = deadline - Date.now();
+    if (left < 1500) { last = last || "timeout"; break; }
     try {
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${env.GEMINI_KEY}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ systemInstruction: { parts: [{ text: sys }] }, contents, tools: [{ functionDeclarations: toolDecls() }], generationConfig: { temperature: 0.3, maxOutputTokens: 2000 } }),
-        signal: AbortSignal.timeout(14000),
+        signal: AbortSignal.timeout(Math.min(14000, left)),
       });
       const j = await r.json();
       const parts = j?.candidates?.[0]?.content?.parts;
@@ -2391,7 +2532,7 @@ async function geminiTools(env, sys, contents) {
       markBusy(m, j);
       if (j?.error?.code === 429) bump(env, "quota");
       last = JSON.stringify(j).slice(0, 200);
-    } catch (e) { last = e.message; }
+    } catch (e) { last = e.message; if (e.name === "TimeoutError") geminiBusy.set(m, Date.now() + 60e3); }
   }
   throw new Error("agent: " + last);
 }
@@ -2409,7 +2550,8 @@ async function aiTurn(env, history, userText) {
   }
   if (contents[0]?.role === "model") contents.shift();
   for (let i = 0; i < 6; i++) {
-    const parts = await geminiTools(env, sys, contents);
+    if (Date.now() > deadline) return { kind: "say", text: "זה לוקח יותר מדי זמן. נסה לבקש שוב בצורה פשוטה יותר." };
+    const parts = await geminiTools(env, sys, contents, deadline + 8000);
     const call = parts.find((p) => p.functionCall)?.functionCall;
     if (!call) {
       const text = parts.map((p) => p.text || "").join(" ").trim();
@@ -2424,7 +2566,14 @@ async function aiTurn(env, history, userText) {
     if (ACTIONS[name]) {
       let desc;
       try { desc = await ACTIONS[name].describe(env, args); }
-      catch (e) { return { kind: "say", text: "לא מצאתי את מה שביקשת. אפשר לנסות שוב בניסוח אחר." }; }
+      catch (e) {
+        if (e.soft) {
+          contents.push({ role: "model", parts });
+          contents.push({ role: "user", parts: [{ functionResponse: { name, response: { result: { error: e.message } } } }] });
+          continue;
+        }
+        return { kind: "say", text: "לא מצאתי את מה שביקשת. אפשר לנסות שוב בניסוח אחר." };
+      }
       return { kind: "confirm", action: { name, args }, desc, twice: !!ACTIONS[name].twice };
     }
     contents.push({ role: "model", parts });
@@ -2437,22 +2586,54 @@ async function aiTurn(env, history, userText) {
   return { kind: "say", text: "לא הצלחתי להשלים את הבקשה. נסה לנסח אותה אחרת." };
 }
 
-async function runAiJob(env, callId, jobId, path, history, chosen = "", text = "") {
+// תור של העוזר כמשימת רקע: job = { type: "ai", path | chosen | text, history }. מחזיר את התוצאה (בלי לכתוב ל-DO)
+async function aiJobResult(env, job) {
+  const { path, history = [], chosen = "", text = "" } = job;
   let user = "";
   try {
     if (chosen) user = chosen;
     else if (text) user = text;
     else {
       user = await transcribeVal(env, path, "assistant");
-      if (user === null) return await setJob(env, callId, { id: jobId, status: "done", kind: "exit" });
-      if (!user) return await setJob(env, callId, { id: jobId, status: "done", kind: "empty" });
+      if (user === null) return { kind: "exit" };
+      if (!user) return { kind: "empty" };
     }
     const res = await aiTurn(env, history, chosen ? `(בחרתי בתפריט את האפשרות: ${chosen})` : "(תמלול של מה שאמרתי) " + user);
-    await setJob(env, callId, { id: jobId, status: "done", user, ...res });
+    return { user, ...res };
   } catch (e) {
     await logEvent(env, "שגיאה בעוזר החכם: " + e.message);
-    await setJob(env, callId, { id: jobId, status: "done", user, kind: "say", text: "הייתה תקלה. נסה שוב." });
+    return { user, kind: "say", text: "הייתה תקלה. נסה שוב." };
   }
+}
+// תוצאת פעולה: מחרוזת, או { say, mem } כשיש פרט (קישור, מזהה) שהמודל צריך לזכור אבל אין טעם להקריא
+const resultSpoken = (r) => String(r?.say ?? r ?? "בוצע.");
+const resultMemo = (r) => (r?.mem ? `${resultSpoken(r)} ${r.mem}` : resultSpoken(r));
+// פעולה ארוכה של העוזר (קובץ מצורף גדול, מאות מיילים) כמשימת רקע
+const SLOW_ACTIONS = new Set(["read_attachment", "mark_all_read", "archive_many", "trash_many"]);
+async function actionJobResult(env, job) {
+  try {
+    const out = await ACTIONS[job.name].run(env, job.args);
+    if (job.desc) await logEvent(env, `העוזר החכם ביצע באישור: ${job.desc}`);
+    return { kind: "action", ok: true, text: resultSpoken(out), memo: resultMemo(out), desc: job.desc || "" };
+  } catch (e) {
+    await logEvent(env, `פעולת העוזר נכשלה (${job.name}): ${e.message}`);
+    return { kind: "action", ok: false, text: job.name === "read_attachment" ? "לא הצלחתי לקרוא את הקובץ." : "הפעולה נכשלה ולא בוצעה.", desc: job.desc || "" };
+  }
+}
+// כל משימות הרקע (מדיה, הקלטה לדרייב, תור של העוזר, פעולה ארוכה)
+async function runJob(env, job) {
+  if (job.type === "ai") return aiJobResult(env, job);
+  if (job.type === "action") return actionJobResult(env, job);
+  return runMediaJob(env, job);
+}
+// הפעלת משימת רקע. ב-Cloudflare היא רצה בתוך ה-Durable Object (alarm) שמותר לו לרוץ עד 15 דקות,
+// ולא ב-waitUntil של ה-Worker, שנקטע אחרי 30 שניות (ואז המתקשר היה שומע "לא הצלחתי לקבל תשובה בזמן")
+async function startBgJob(ctx, id, job) {
+  const env = ctx.env, callId = ctx.q.ApiCallId || "nocall";
+  if (env.CALLS) { await stub(env, callId).fetch("https://do/startjob", { method: "POST", body: JSON.stringify({ id, job }) }); return; }
+  await setJob(env, callId, { id, status: "run" });
+  const p = runJob(env, job).catch(() => ({ kind: "say", text: job.type === "ai" ? "הייתה תקלה. נסה שוב." : "לא הצלחתי." })).then((res) => setJob(env, callId, { id, status: "done", ...res }));
+  ctx.ctx?.waitUntil?.(p);
 }
 
 const AI_LISTEN = "דבר אחרי הצליל ובסיום הקש סולמית. ליציאה, הקש סולמית בלי לומר כלום.";
@@ -2478,9 +2659,7 @@ H.aiRec = async (st, input, ctx) => {
   const jobId = "j" + st.n;
   st.ai.job = jobId;
   st.ai.polls = 0;
-  await setJob(ctx.env, ctx.q.ApiCallId || "nocall", { id: jobId, status: "run" });
-  const p = runAiJob(ctx.env, ctx.q.ApiCallId || "nocall", jobId, input, st.ai.h);
-  if (ctx.ctx?.waitUntil) ctx.ctx.waitUntil(p);
+  await startBgJob(ctx, jobId, { type: "ai", path: input, history: st.ai.h });
   st.step = "aiWait";
   return aiWaitPrompt(st, "רגע, אני בודק");
 };
@@ -2496,11 +2675,15 @@ H.aiWait = async (st, input, ctx) => {
   const job = await getJob(ctx.env, ctx.q.ApiCallId || "nocall");
   if (!job || job.id !== st.ai.job || job.status !== "done") {
     st.ai.polls++;
-    if (st.ai.polls > 10) return go(st, "aiListen", undefined, ctx, "לא הצלחתי לקבל תשובה בזמן. נסה שוב.");
+    if (st.ai.polls > 14) return go(st, "aiListen", undefined, ctx, "לא הצלחתי לקבל תשובה בזמן. נסה שוב.");
     return aiWaitPrompt(st);
   }
   if (job.kind === "exit") return aiExit(st, ctx);
   if (job.kind === "empty") return go(st, "aiListen", undefined, ctx, "לא שמעתי. נסה שוב.");
+  if (job.kind === "action") {
+    pushHist(st, "user", job.ok ? `(אישרתי. בוצע: ${job.desc}. התוצאה: ${String(job.memo || job.text).slice(0, 300)})` : `(הפעולה נכשלה: ${job.desc})`);
+    return go(st, "aiListen", undefined, ctx, job.text);
+  }
   pushHist(st, "user", job.user);
   if (job.kind === "say") {
     pushHist(st, "model", job.text);
@@ -2530,10 +2713,7 @@ H.aiChoice = async (st, input, ctx) => {
   const jobId = "j" + st.n;
   st.ai.job = jobId;
   st.ai.polls = 0;
-  const callId = ctx.q.ApiCallId || "nocall";
-  await setJob(ctx.env, callId, { id: jobId, status: "run" });
-  const p = runAiJob(ctx.env, callId, jobId, null, st.ai.h, pick);
-  if (ctx.ctx?.waitUntil) ctx.ctx.waitUntil(p);
+  await startBgJob(ctx, jobId, { type: "ai", history: st.ai.h, chosen: pick });
   st.step = "aiWait";
   return aiWaitPrompt(st, "בחרת " + pick);
 };
@@ -2550,6 +2730,14 @@ H.aiConfirm = async (st, input, ctx) => {
     return R.msg("שים לב, את הפעולה הזו אי אפשר לבטל אחרי הביצוע.") + R.menu(st, "לאישור סופי הקש 1. לחזרה לשיחה הקש 2.", "1.2");
   }
   delete st.ai.pending;
+  if (SLOW_ACTIONS.has(p.action.name)) {
+    // פעולה ארוכה: רצה ברקע עם מנגינת המתנה, במקום לחכות בתוך הבקשה של ימות (שלא מחכה הרבה)
+    const jobId = "j" + st.n;
+    st.ai.job = jobId; st.ai.polls = 0;
+    await startBgJob(ctx, jobId, { type: "action", name: p.action.name, args: p.action.args, desc: p.desc });
+    st.step = "aiWait";
+    return aiWaitPrompt(st, "רגע, מבצע");
+  }
   if (p.action.name === "listen_youtube") {
     pushHist(st, "user", `(אישרתי: ${p.desc})`);
     st.media = { back: "ai" };
@@ -2557,8 +2745,9 @@ H.aiConfirm = async (st, input, ctx) => {
   }
   let out;
   try {
-    out = await ACTIONS[p.action.name].run(ctx.env, p.action.args);
-    pushHist(st, "user", `(אישרתי. בוצע: ${p.desc}. התוצאה: ${String(out).slice(0, 300)})`);
+    const res = await ACTIONS[p.action.name].run(ctx.env, p.action.args);
+    out = resultSpoken(res);
+    pushHist(st, "user", `(אישרתי. בוצע: ${p.desc}. התוצאה: ${resultMemo(res).slice(0, 300)})`);
     await logEvent(ctx.env, `העוזר החכם ביצע באישור: ${p.desc}`);
   } catch (e) {
     await logEvent(ctx.env, `פעולת העוזר נכשלה (${p.action.name}): ${e.message}`);
@@ -2572,10 +2761,20 @@ H.aiConfirm = async (st, input, ctx) => {
 // קובץ מהצאט: מורידים, מעלים לימות עם המרה לשמע, ומשמיעים. יוטיוב: Gemini צופה בסרטון ומחזיר תקציר או תמלול בעברית
 // (את השמע המקורי של יוטיוב אי אפשר להוריד ולהשמיע). ההכנה רצה ברקע ב-Durable Object, והמתקשר שומע מנגינת המתנה.
 const YT_API = "https://www.googleapis.com/youtube/v3/";
+// יוטיוב: עם מפתח API (YT_KEY) אם הוגדר, אחרת עם ההרשאה של החשבון (דורשת youtube.readonly בחיבור לגוגל)
+async function ytGet(env, path) {
+  if (env.YT_KEY) {
+    const r = await fetch(`${YT_API}${path}&key=${encodeURIComponent(env.YT_KEY)}`);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`youtube ${r.status}: ${j?.error?.message || ""}`.slice(0, 300));
+    return j;
+  }
+  return gapi(env, `${YT_API}${path}`);
+}
 async function ytTitles(env, ids) {
   if (!ids.length) return {};
   try {
-    const j = await gapi(env, `${YT_API}videos?part=snippet,contentDetails&id=${ids.join(",")}`);
+    const j = await ytGet(env, `videos?part=snippet,contentDetails&id=${ids.join(",")}`);
     return Object.fromEntries((j.items || []).map((v) => [v.id, { title: v.snippet?.title || "", channel: v.snippet?.channelTitle || "", dur: v.contentDetails?.duration || "" }]));
   } catch { return {}; }
 }
@@ -2632,14 +2831,9 @@ async function runMediaJob(env, job) {
   return { kind: "say", text: "סוג לא מוכר." };
 }
 async function startMediaJob(ctx, st, job) {
-  const env = ctx.env, callId = ctx.q.ApiCallId || "nocall", id = "mj" + st.n;
+  const id = "mj" + st.n;
   st.media = { ...(st.media || {}), job: id, polls: 0 };
-  if (env.CALLS) await stub(env, callId).fetch("https://do/startjob", { method: "POST", body: JSON.stringify({ id, job }) });
-  else {
-    await setJob(env, callId, { id, status: "run" });
-    const p = runMediaJob(env, job).catch(() => ({ kind: "say", text: "לא הצלחתי." })).then((res) => setJob(env, callId, { id, status: "done", ...res }));
-    ctx.ctx?.waitUntil?.(p);
-  }
+  await startBgJob(ctx, id, job);
   st.step = "mediaWait";
   return mediaWaitPrompt(st, job.type === "youtube" ? "מכין את הסרטון. זה יכול לקחת עד כמה דקות" : job.type === "recsave" ? "שומר ומתמלל, זה יכול לקחת קצת זמן" : "מכין את הקובץ לשמיעה, רגע");
 }
@@ -2717,7 +2911,7 @@ H.mediaPlay = async (st, input, ctx) => {
   if (input === undefined || input === "1") {
     st.step = "mediaPlay";
     const v = nextVal(st);
-    return `read=f-${st.media.file}.${sp("לשמיעה חוזרת הקש 1. לחזרה הקש 0.", "m")}=${v},no,1,1,10,No,yes,no,,0.1,,Ok,none,`;
+    return `read=f-${st.media.file}.${sp("לשמיעה חוזרת הקש 1. לחזרה הקש 0.", "m")}=${v},no,1,1,10,No,no,no,,0.1.*,,Ok,none,`;
   }
   return mediaBack(st, ctx);
 };
@@ -2865,8 +3059,10 @@ async function renderSpeech(env, out) {
   if (!out.includes(SP0)) return out;
   const mode = await voiceMode(env);
   if (mode === "off") return renderPlain(out);
+  // תקציב זמן אחד לכל הקול הטבעי בתשובה: מה שלא מוכן בזמן מוקרא בקול של ימות (ימות לא מחכה לתשובה איטית)
+  const deadline = Date.now() + (+env.VOICE_BUDGET_MS || 8000);
   const items = [...out.matchAll(SP_RE)].map((m) => ({ k: m[1], t: decSp(m[2]) }));
-  const done = await Promise.all(items.map((x) => (mode === "all" || x.k === "c" ? voiceSay(env, x.t).catch(() => say(x.t)) : say(x.t))));
+  const done = await Promise.all(items.map((x) => (mode === "all" || x.k === "c" ? voiceSay(env, x.t, deadline).catch(() => say(x.t)) : say(x.t))));
   let i = 0;
   return out.replace(SP_RE, () => done[i++]);
 }
@@ -2890,11 +3086,11 @@ function chunkText(t, n) {
   }
   return out.filter(Boolean);
 }
-async function voiceSay(env, t) {
+async function voiceSay(env, t, deadline = Date.now() + 30000) {
   const clean = cleanForVoice(t);
   if (!clean || !/[\p{L}\p{N}]/u.test(clean)) return say(t);
   const chunks = chunkText(clean, 1200);
-  const files = await Promise.all(chunks.slice(0, 4).map((c) => ttsFile(env, c).catch((e) => { logEvent(env, "קול טבעי נכשל: " + trimText(e.message, 120)); return null; })));
+  const files = await Promise.all(chunks.slice(0, 4).map((c) => ttsFile(env, c, deadline).catch((e) => { logEvent(env, "קול טבעי נכשל: " + trimText(e.message, 120)); return null; })));
   return chunks.map((c, i) => (files[i] ? "f-" + files[i] : say(c))).join(".");
 }
 function sentenceChunks(t) {
@@ -2916,12 +3112,14 @@ function pcmToWav(pcm, rate = 24000) {
 }
 // המכסה החינמית של קול היא 3 בקשות בדקה לכל מודל, לכן מסובבים בין כמה מודלים ומדלגים על מודל חסום
 let ttsRound = 0;
-async function ttsBytes(env, text) {
+async function ttsBytes(env, text, deadline = Date.now() + 30000) {
   const all = (env.TTS_MODELS || "gemini-3.8-flash-tts,gemini-2.5-flash-preview-tts,gemini-3.1-flash-tts-preview,gemini-3.8-flash-lite-tts").split(",").map((s) => s.trim());
   const start = ttsRound++ % all.length;
   const models = all.slice(start).concat(all.slice(0, start)).filter((x) => !isBusy(x));
   let last = "";
   for (const m of models) {
+    const left = deadline - Date.now();
+    if (left < 1500) { last = last || "timeout"; break; }
     try {
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${env.GEMINI_KEY}`, {
         method: "POST", headers: { "content-type": "application/json" },
@@ -2929,7 +3127,7 @@ async function ttsBytes(env, text) {
           contents: [{ parts: [{ text }] }],
           generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: env.TTS_VOICE || "Orus" } } } },
         }),
-        signal: AbortSignal.timeout(12000),
+        signal: AbortSignal.timeout(Math.min(12000, left)),
       });
       const j = await r.json();
       bump(env, "tts");
@@ -2944,21 +3142,22 @@ async function ttsBytes(env, text) {
       markBusy(m, j);
       if (j?.error?.code === 429) bump(env, "quota");
       last = JSON.stringify(j).slice(0, 160);
-    } catch (e) { last = e.message; }
+    } catch (e) { last = e.message; if (e.name === "TimeoutError") geminiBusy.set(m, Date.now() + 60e3); }
   }
   throw new Error("tts: " + last);
 }
-async function ttsFile(env, text) {
+async function ttsFile(env, text, deadline = Date.now() + 30000) {
   const key = (await sha("v2|" + (env.TTS_VOICE || "Orus") + "|" + text)).slice(0, 24);
   const file = "/tts/" + key;
   if (await env.KV.get("tts:" + key)) return file;
-  const wav = await ttsBytes(env, text);
+  const wav = await ttsBytes(env, text, deadline);
+  if (deadline - Date.now() < 1000) throw new Error("timeout before upload");
   const fd = new FormData();
   fd.append("token", env.YM_TOKEN);
   fd.append("path", `ivr2:${file}.wav`);
   fd.append("convertAudio", "1");
   fd.append("file", new Blob([wav], { type: "audio/wav" }), "t.wav");
-  const u = await (await fetch(YM + "UploadFile", { method: "POST", body: fd, signal: AbortSignal.timeout(12000) })).json();
+  const u = await (await fetch(YM + "UploadFile", { method: "POST", body: fd, signal: AbortSignal.timeout(Math.min(12000, Math.max(1000, deadline - Date.now()))) })).json();
   if (u.responseStatus !== "OK") throw new Error("upload: " + (u.message || u.responseStatus));
   await env.KV.put("tts:" + key, "1", { expirationTtl: 90 * 86400 });
   return file;
@@ -3370,7 +3569,8 @@ async function sitesCheck(env) {
     const t = Date.now();
     try {
       const r = await fetch(s.u, { signal: AbortSignal.timeout(10000), headers: { "user-agent": "yemot-line-check" } });
-      return `${s.n}: ${r.ok ? "תקין" : "מחזיר שגיאה " + r.status}, זמן תגובה ${((Date.now() - t) / 1000).toFixed(1)} שניות`;
+      const sec = (Date.now() - t) / 1000;
+      return `${s.n}: ${r.ok ? "תקין" : "מחזיר שגיאה " + r.status}, זמן תגובה ${sec < 1 ? "פחות משנייה" : Math.round(sec) + " שניות"}`;
     } catch (e) { return `${s.n}: לא מגיב`; }
   }));
 }
@@ -3486,11 +3686,9 @@ async function phoneLookup(env, name) {
 }
 // הפעלת העוזר החכם עם טקסט מוכן (בלי הקלטה נוספת)
 async function aiAsk(st, ctx, text) {
-  const callId = ctx.q.ApiCallId || "nocall", jobId = "j" + st.n;
+  const jobId = "j" + st.n;
   st.ai.job = jobId; st.ai.polls = 0;
-  await setJob(ctx.env, callId, { id: jobId, status: "run" });
-  const p = runAiJob(ctx.env, callId, jobId, null, st.ai.h, "", text);
-  if (ctx.ctx?.waitUntil) ctx.ctx.waitUntil(p);
+  await startBgJob(ctx, jobId, { type: "ai", history: st.ai.h, text });
   st.step = "aiWait";
   return aiWaitPrompt(st, "רגע, אני בודק");
 }
@@ -3618,6 +3816,8 @@ async function scheduledTick(env) {
   }
 }
 
+// שלבים שבהם "none" הוא פול רגיל של המתנה למשימת רקע (מנגינת המתנה), ולא שתיקה של המתקשר
+const WAIT_STEPS = new Set(["aiWait", "mediaWait", "clWait", "botWait"]);
 // מעבר לשלב אחר (מריץ אותו מיד, בלי קלט)
 const PRE_STEPS = new Set(["main", "grpBrowse", "rec", "aiListen", "clIntro", "mailStart", "mailSearchRec", "chatEmpty", "chatSearchRec", "filesMenu", "settingsMenu", "navRec", "recDoc", "resumeAsk"]);
 async function go(st, step, input, ctx, pre = "") {
@@ -3658,8 +3858,34 @@ async function handleYemot(req, env, ctx) {
     input = q[st.expect];
     if (input === undefined) return text(st.last || R.hangup()); // בקשה חוזרת בלי קלט חדש
     if (input === "None" || input === "") input = "none";
-    if (input === "*" && st.last) return text(st.last); // כוכבית: שמיעה חוזרת של מה שנאמר
+    if (input === "*" && st.last) {
+      // כוכבית: שמיעה חוזרת של מה שנאמר, עם שם משתנה חדש (ימות לא אוהבת read על משתנה שכבר קיבל ערך)
+      const out = st.last.replace(/=V\d+,/, () => "=" + nextVal(st) + ",");
+      st.last = out;
+      await saveState(env, callId, st);
+      return text(out);
+    }
     if (input !== "none") st.idle = 0;
+    // מתקשר ששותק לאורך זמן (לא בזמן המתנה למשימת רקע): מסיימים את השיחה במקום לחזור על התפריט בלי סוף
+    if (input === "none" && !WAIT_STEPS.has(st.step)) {
+      st.silent = (st.silent || 0) + 1;
+      if (st.silent >= 6) {
+        if (st.compose?.audio) ymDelete(env, st.compose.audio);
+        await dropState(env, callId);
+        return text(renderPlain(R.msg("לא התקבלה הקשה. להתראות") + R.hangup()));
+      }
+    } else if (input !== "none") st.silent = 0;
+    // ימות עלולה לשלוח את אותה בקשה פעם נוספת כשהתשובה מתעכבת. מטפלים בכל הקשה פעם אחת בלבד:
+    // הבקשה הכפולה מחכה שהראשונה תסיים ומחזירה את אותה תשובה (במקום לבצע את הפעולה פעמיים)
+    if (!(await claimInput(env, callId, st.expect).catch(() => true))) {
+      for (let i = 0; i < 36; i++) {
+        await sleep(700);
+        const b = await busyOf(env, callId).catch(() => null);
+        if (!b || b.expect !== st.expect) break;
+      }
+      const fresh = await loadState(env, callId).catch(() => null);
+      return text(fresh?.last || st.last || R.hangup());
+    }
   }
   if (st.step !== "start" && st.step !== "pin" && !st.authed) st = { step: "start", n: st.n || 0 };
 
