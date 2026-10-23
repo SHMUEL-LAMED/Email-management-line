@@ -407,7 +407,7 @@ function bodyOf(payload) {
   walk(payload);
   let t = plain.trim() ? plain : htmlToText(htm);
   // הסרת ציטוט של מייל קודם (גם כותרות ציטוט בעברית של Gmail ו-Outlook)
-  const cut = t.search(/\n\s*(On .{5,120}wrote:|ב.{3,120}נכתב:|ב.{3,120}כתב\/ה:|בתאריך .{5,160}מאת .{1,160}:|מאת: .+\n.*נשלח:|-{3,}\s*Original Message|-{3,}\s*Forwarded message|From: .+\n.*(Sent|Date):)/i);
+  const cut = t.search(/\n\s*(On .{5,120}wrote:|ב.{3,120}נכתב:|ב.{3,120}כתב\/ה:|\u202b?בתאריך .{5,200}מאת .{1,160}:|מאת: .+\n.*נשלח:|-{3,}\s*Original Message|-{3,}\s*Forwarded message|From: .+\n.*(Sent|Date):)/i);
   if (cut > 40) t = t.slice(0, cut);
   t = t.split("\n").filter((l) => !/^\s*>/.test(l)).join("\n");
   return t.replace(/\n{2,}/g, "\n").trim();
@@ -1790,10 +1790,12 @@ async function chatSendAudio(env, space, bytes, caption = "") {
   const r = await fetch(`https://chat.googleapis.com/upload/v1/${space}/attachments:upload?uploadType=multipart`, {
     method: "POST", headers: { Authorization: "Bearer " + (await accessToken(env)), "Content-Type": `multipart/related; boundary=${b}` }, body,
   });
-  const j = await r.json().catch(() => ({}));
+  const raw = await r.text();
+  let j = {};
+  try { j = JSON.parse(raw); } catch {}
   // התשובה של media.upload היא { attachmentDataRef: { attachmentUploadToken } }, וכך גם צריך לצרף להודעה
-  const tok = j.attachmentDataRef?.attachmentUploadToken || j.attachmentUploadToken;
-  if (!r.ok || !tok) throw new Error("chat upload " + r.status + " " + (j.error?.message || ""));
+  const tok = j.attachmentDataRef?.attachmentUploadToken || j.attachmentUploadToken || j.attachment_upload_token || j.uploadedAttachment?.attachmentUploadToken;
+  if (!r.ok || !tok) throw new Error("chat upload " + r.status + " " + trimText(raw, 200));
   return gapi(env, `${G.chat}${space}/messages`, { body: { text: caption ? "🎤 " + caption : "🎤 הודעה קולית", attachment: [{ attachmentDataRef: { attachmentUploadToken: tok } }] } });
 }
 
@@ -2989,7 +2991,7 @@ H.clIntro = async (st, input, ctx, pre = "") => {
   st.cl.saidRun = true;
   const p = b.live
     ? "קלאוד מחובר עכשיו. דבר אחרי הצליל, ובסיום הקש סולמית. ליציאה הקש סולמית בלי לומר כלום."
-    : `קלאוד לא מחובר כרגע.${last} השאר הודעה אחרי הצליל, וקלאוד יענה בבדיקה הבאה. הבדיקות הן בימים ראשון עד חמישי, פעם בשעה, מאחת בצהריים עד ארבע, ומשבע בערב עד שתיים בלילה. אפשר גם לשלוח לקלאוד מייל מהמייל העסקי לעצמך, עם המילה שש בנושא. בסיום הקש סולמית. ליציאה הקש סולמית בלי לומר כלום.`;
+    : `קלאוד לא מחובר כרגע.${last} השאר הודעה אחרי הצליל, וקלאוד יענה בבדיקה הבאה. הבדיקות הן פעם בשעה, בימים ראשון עד חמישי מאחת בצהריים עד ארבע ומשבע בערב עד שתיים בלילה, וגם במוצאי שבת. אפשר גם לשלוח לקלאוד מייל מהמייל העסקי לעצמך, עם המילה שש בנושא. בסיום הקש סולמית. ליציאה הקש סולמית בלי לומר כלום.`;
   return (pre ? R.msg(pre) : "") + R.record(st, p);
 };
 H.clRec = async (st, input, ctx) => {
@@ -3122,10 +3124,10 @@ async function ttsBytes(env, text, deadline = Date.now() + 30000) {
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${env.GEMINI_KEY}`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: "קרא בעברית, בקול גברי רגוע וברור, בקצב טבעי של שיחה בטלפון. שמות באנגלית בטא כרגיל:\n" + text }] }],
+          contents: [{ parts: [{ text }] }],
           generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: env.TTS_VOICE || "Orus" } } } },
         }),
-        signal: AbortSignal.timeout(Math.min(14000, left)),
+        signal: AbortSignal.timeout(Math.min(12000, left)),
       });
       const j = await r.json();
       bump(env, "tts");
@@ -3145,7 +3147,7 @@ async function ttsBytes(env, text, deadline = Date.now() + 30000) {
   throw new Error("tts: " + last);
 }
 async function ttsFile(env, text, deadline = Date.now() + 30000) {
-  const key = (await sha("v1|" + (env.TTS_VOICE || "Orus") + "|" + text)).slice(0, 24);
+  const key = (await sha("v2|" + (env.TTS_VOICE || "Orus") + "|" + text)).slice(0, 24);
   const file = "/tts/" + key;
   if (await env.KV.get("tts:" + key)) return file;
   const wav = await ttsBytes(env, text, deadline);
@@ -3695,15 +3697,30 @@ async function aiAsk(st, ctx, text) {
 
 // ---- מיילים לקלאוד: מייל שהוא שולח מהמייל העסקי לעצמו, עם "שש" בנושא
 const CL_SUBJECT = "שש";
+const CL_COPY_SUBJECT = "תשובה מקלאוד בקו";
+// כל הכתובות שהוא שולח מהן (המייל העסקי וכתובות "שלח בשם" שלו), במטמון ליום
+async function myAddresses(env) {
+  const c = await kvJson(env, "myaddrs");
+  if (c && Date.now() - c.t < 86400e3) return c.list;
+  const set = new Set([String(env.BUSINESS_EMAIL || "").toLowerCase()]);
+  try { (await gapi(env, `${G.gmail}settings/sendAs`)).sendAs?.forEach((a) => a.sendAsEmail && set.add(a.sendAsEmail.toLowerCase())); } catch {}
+  try { const p = await gapi(env, `${G.gmail}profile`); if (p.emailAddress) set.add(p.emailAddress.toLowerCase()); } catch {}
+  const list = [...set];
+  await env.KV.put("myaddrs", JSON.stringify({ t: Date.now(), list }));
+  return list;
+}
 async function claudeMails(env) {
-  const me = String(env.BUSINESS_EMAIL || "").toLowerCase();
+  const mine = new Set(await myAddresses(env));
   const done = new Set(await kvJson(env, "clmail:done", []));
-  const ids = await gmailIds(env, `from:${me} to:${me} subject:${CL_SUBJECT} newer_than:14d`, 20);
+  const ids = await gmailIds(env, `(subject:${CL_SUBJECT} OR subject:"${CL_COPY_SUBJECT}") newer_than:14d`, 30);
   const out = [];
   for (const id of ids.filter((x) => !done.has(x))) {
     const m = await gmailGet(env, id).catch(() => null);
-    if (!m || m.fromEmail.toLowerCase() !== me) continue;
-    if (!/(^|\s)שש(\s|$|:)/.test(m.subject.replace(/^(re|fwd?)\s*:\s*/i, ""))) continue;
+    if (!m || !mine.has(m.fromEmail.toLowerCase())) continue;
+    const subj = m.subject.replace(/^(re|fwd?)\s*:\s*/i, "");
+    const isCopyThread = subj.startsWith(CL_COPY_SUBJECT);
+    if (!isCopyThread && !/(^|\s)שש(\s|$|:)/.test(subj)) continue;
+    if (/^\s*(השאלה שלך:|התשובה:)/.test(m.body)) continue; // עותק שהקו עצמו שלח
     out.push({ id, threadId: m.threadId, subject: m.subject, text: trimText(m.body, 6000), at: m.date, msgId: m.msgId, refs: m.refs });
   }
   return out;
@@ -3722,8 +3739,10 @@ async function claudeEmailReply(env, id, text) {
 }
 // עותק במייל של תשובה שקלאוד נתן בקו
 async function mailCopyOfAnswer(env, question, answer) {
-  try { await gmailSend(env, { to: env.BUSINESS_EMAIL, subject: "תשובה מקלאוד בקו", body: `${question ? "השאלה שלך:\n" + question + "\n\n" : ""}התשובה:\n${answer}` }); }
-  catch (e) { await logEvent(env, "עותק במייל נכשל: " + e.message); }
+  try {
+    const r = await gmailSend(env, { to: env.BUSINESS_EMAIL, subject: CL_COPY_SUBJECT, body: `${question ? "השאלה שלך:\n" + question + "\n\n" : ""}התשובה:\n${answer}\n\n(אפשר להשיב למייל הזה, והתשובה תגיע לקלאוד)` });
+    if (r?.id) await markClaudeMailDone(env, r.id);
+  } catch (e) { await logEvent(env, "עותק במייל נכשל: " + e.message); }
 }
 
 // ---- זיכרון של העוזר החכם בין שיחות (סיכום קצר של מה שחשוב)
@@ -3973,10 +3992,28 @@ async function oauthCallback(env, url) {
 }
 
 // ---- API לריצה המתוזמנת של Claude (מוגן במפתח BRIDGE_KEY)
+// שקיעה בירושלים (חישוב אסטרונומי מקורב, דיוק של כמה דקות) – לזמני כניסת שבת וצאת שבת
+function sunsetIL(d = new Date()) {
+  const lat = 31.78, lng = 35.22, rad = Math.PI / 180;
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d).map((x) => [x.type, x.value]));
+  const jd = Date.UTC(+p.year, +p.month - 1, +p.day) / 86400e3 + 2440587.5; // יום יוליאני בחצות UTC
+  const n = Math.ceil(jd - 2451545.0 + 0.0008);
+  const Js = n - lng / 360;
+  const M = ((357.5291 + 0.98560028 * Js) % 360 + 360) % 360;
+  const C = 1.9148 * Math.sin(M * rad) + 0.02 * Math.sin(2 * M * rad) + 0.0003 * Math.sin(3 * M * rad);
+  const L = (M + C + 180 + 102.9372) % 360;
+  const Jtr = 2451545.0 + Js + 0.0053 * Math.sin(M * rad) - 0.0069 * Math.sin(2 * L * rad);
+  const dec = Math.asin(Math.sin(L * rad) * Math.sin(23.4397 * rad));
+  const cosH = (Math.sin(-0.833 * rad) - Math.sin(lat * rad) * Math.sin(dec)) / (Math.cos(lat * rad) * Math.cos(dec));
+  const H = Math.acos(Math.max(-1, Math.min(1, cosH))) / rad;
+  return new Date((Jtr + H / 360 - 2440587.5) * 86400e3);
+}
+// שבת: מ-60 דקות לפני השקיעה ביום שישי, עד 50 דקות אחרי השקיעה במוצאי שבת
 function isShabbatIL(d = new Date()) {
-  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jerusalem", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(d).map((x) => [x.type, x.value]));
-  const hm = (+p.hour % 24) * 60 + +p.minute;
-  return (p.weekday === "Fri" && hm >= 15 * 60 + 30) || (p.weekday === "Sat" && hm < 20 * 60);
+  const wd = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jerusalem", weekday: "short" }).format(d);
+  if (wd === "Fri") return d.getTime() >= sunsetIL(d).getTime() - 60 * 60e3;
+  if (wd === "Sat") return d.getTime() < sunsetIL(d).getTime() + 50 * 60e3;
+  return false;
 }
 async function bridgeApi(req, env, url) {
   const key = url.searchParams.get("k") || req.headers.get("x-bridge-key");
@@ -3990,6 +4027,7 @@ async function bridgeApi(req, env, url) {
     return J({ ...(await bridge(env, "peek")), new_emails, shabbat: isShabbatIL(), now_israel: nowIL() });
   }
   if (op === "emails") return J({ emails: await claudeMails(env) });
+  if (op === "state") return J(await bridge(env, "state"));
   if (op === "email_reply") {
     if (!body.id || !body.text) return J({ error: "id או text חסרים" });
     const r = await claudeEmailReply(env, body.id, String(body.text));
@@ -4033,4 +4071,4 @@ export default {
 };
 
 // לבדיקות
-export { saveMailToDrive, H, say, bodyOf, parseAddr, handleYemot, findPeople, toHebrew, transcribe, geminiTools, aiSystem, runMediaJob, scheduledTick, claudeMails, renderSpeech, chunkText };
+export { isShabbatIL, sunsetIL, saveMailToDrive, H, say, bodyOf, parseAddr, handleYemot, findPeople, toHebrew, transcribe, geminiTools, aiSystem, runMediaJob, scheduledTick, claudeMails, renderSpeech, chunkText };
