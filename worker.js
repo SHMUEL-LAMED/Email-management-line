@@ -615,11 +615,11 @@ async function spaceMembers(env, spaceName) {
 }
 // סרטונים והקלטות בהודעות צאט: קבצים מצורפים (וידאו/אודיו) וקישורי יוטיוב
 const YT_RE = /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:[^\s]*&)?v=|shorts\/|live\/)|youtu\.be\/)([\w-]{11})[^\s]*/g;
-const isMediaAtt = (a) => /^(video|audio)\//.test(a.contentType || "") || /\.(mp4|mov|m4a|mp3|ogg|opus|wav|webm|3gp|aac|avi|mkv)$/i.test(a.contentName || "");
+const isMediaAtt = (a) => /^(video|audio)\//.test(a.contentType || "") || /\.(mp4|mov|m4a|m4v|mp3|ogg|opus|wav|webm|3gp|aac|amr|wma|wmv|flac|avi|mkv)$/i.test(a.contentName || "");
 function mediaOf(m) {
   const out = [];
   for (const a of m.attachment || []) {
-    if (isMediaAtt(a)) out.push({ kind: "file", name: a.contentName || "קובץ", mime: a.contentType || "", res: a.attachmentDataRef?.resourceName || "", drive: a.driveDataRef?.driveFileId || "", video: /^video\//.test(a.contentType || "") || /\.(mp4|mov|webm|3gp|avi|mkv)$/i.test(a.contentName || "") });
+    if (isMediaAtt(a)) out.push({ kind: "file", name: a.contentName || "קובץ", mime: a.contentType || "", res: a.attachmentDataRef?.resourceName || "", drive: a.driveDataRef?.driveFileId || "", video: /^video\//.test(a.contentType || "") || /\.(mp4|mov|webm|3gp|avi|mkv|m4v|wmv)$/i.test(a.contentName || "") });
   }
   for (const x of String(m.text || "").matchAll(YT_RE)) out.push({ kind: "youtube", id: x[1], msgName: m.name || "", thread: m.thread?.name || "", ut: m.lastUpdateTime || m.createTime || "", text: String(m.text || "").slice(0, 300) });
   return out;
@@ -1322,10 +1322,17 @@ H.attList = async (st, input, ctx) => {
   if (!a) { st.step = "mailMenu"; return R.menu(st, MAIL_MENU, MAIL_KEYS); }
   st.att = { ...a, index: +input };
   st.step = "attMenu";
-  return R.menu(st, `הקובץ ${await heb(env, a.name)}, ${Math.max(1, Math.round(a.size / 1024))} קילובייט. לסיכום הקש 1. להקראה מלאה הקש 2. לשליחה לאדם אחר הקש 3. לשמירה בדרייב הקש 4. לחזרה הקש 0.`, "0.1.2.3.4");
+  const kb = Math.max(1, Math.round(a.size / 1024));
+  // קובץ וידאו או אודיו: מקש 1 ממיר אותו לשמע ומשמיע (כמו קבצים מהצאט)
+  if (isMailMedia(a)) return R.menu(st, `${isMailVideo(a) ? "סרטון" : "הקלטה"}, ${await heb(env, a.name)}, ${kb} קילובייט. לשמיעה הקש 1. לשליחה לאדם אחר הקש 3. לשמירה בדרייב הקש 4. לחזרה הקש 0.`, "0.1.3.4");
+  return R.menu(st, `הקובץ ${await heb(env, a.name)}, ${kb} קילובייט. לסיכום הקש 1. להקראה מלאה הקש 2. לשליחה לאדם אחר הקש 3. לשמירה בדרייב הקש 4. לחזרה הקש 0.`, "0.1.2.3.4");
 };
 H.attMenu = async (st, input, ctx) => {
   const env = ctx.env, c = st.cur, a = st.att;
+  if (input === "1" && isMailMedia(a)) {
+    st.media = { back: "mail" };
+    return startMediaJob(ctx, st, { type: "file", mailId: c.id, attId: a.id, size: a.size, mime: a.mime, name: a.name });
+  }
   if (input === "1" || input === "2") {
     // הקריאה רצה ברקע עם מנגינת המתנה: קובץ גדול לוקח יותר זמן ממה שימות מחכה לתשובה
     st.media = { back: "mail" };
@@ -1341,6 +1348,8 @@ H.attMenu = async (st, input, ctx) => {
   }
   st.step = "mailMenu"; return R.menu(st, MAIL_MENU, MAIL_KEYS);
 };
+const isMailVideo = (a) => /^video\//.test(a.mime || "") || /\.(mp4|mov|webm|3gp|avi|mkv|m4v|wmv)$/i.test(a.name || "");
+const isMailMedia = (a) => isMailVideo(a) || /^audio\//.test(a.mime || "") || /\.(m4a|mp3|ogg|opus|wav|aac|amr|wma|flac)$/i.test(a.name || "");
 async function attachmentBytes(env, mailId, attId) {
   const j = await gapi(env, `${G.gmail}messages/${mailId}/attachments/${attId}`);
   return unb64url(j.data);
@@ -2780,29 +2789,117 @@ async function ytTitles(env, ids) {
 }
 const ytDur = (d) => { const m = String(d).match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/); if (!m) return ""; const h = +m[1] || 0, mi = +m[2] || 0; return h ? `${h} שעות ו ${mi} דקות` : mi ? `${mi} דקות` : "פחות מדקה"; };
 
+// ---- השמעת קובץ שמע או וידאו (מהצאט, מהמייל או מהדרייב) בטלפון
+// ימות ממירה את הקובץ ל-wav (מווידאו נשאר רק הקול). אם ההמרה נכשלת, או כשמבקשים במילים, Gemini מתמלל את מה שנאמר.
+const MEDIA_MAX = 45e6;
+const MEDIA_EXT = {
+  "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/m4a": "m4a", "audio/aac": "aac", "audio/x-aac": "aac",
+  "audio/ogg": "ogg", "audio/opus": "opus", "audio/webm": "webm", "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav", "audio/amr": "amr",
+  "audio/3gpp": "3gp", "audio/flac": "flac", "audio/x-flac": "flac", "audio/x-ms-wma": "wma",
+  "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm", "video/3gpp": "3gp", "video/x-msvideo": "avi", "video/x-matroska": "mkv", "video/x-ms-wmv": "wmv", "video/x-m4v": "m4v", "video/mpeg": "mpeg",
+};
+const GEMINI_MEDIA = { mp3: "audio/mp3", m4a: "audio/aac", aac: "audio/aac", ogg: "audio/ogg", opus: "audio/ogg", wav: "audio/wav", flac: "audio/flac", amr: "audio/amr", wma: "video/wmv", webm: "video/webm", mp4: "video/mp4", m4v: "video/mp4", mov: "video/mov", "3gp": "video/3gpp", avi: "video/avi", mkv: "video/webm", wmv: "video/wmv", mpeg: "video/mpeg" };
+const MEDIA_EXTS = new Set(Object.values(MEDIA_EXT));
+const VIDEO_EXT = /^(mp4|mov|webm|3gp|avi|mkv|m4v|wmv|mpeg)$/;
+// הסיומת קובעת איך ימות ממירה. שם בעברית או בלי סיומת (הודעה קולית) גורם לכשל, לכן שולחים תמיד שם באנגלית עם סיומת נכונה
+function mediaExt(name, mime) {
+  const m = String(name || "").match(/\.([a-z0-9]{2,4})$/i);
+  if (m && MEDIA_EXTS.has(m[1].toLowerCase())) return m[1].toLowerCase();
+  const t = String(mime || "").split(";")[0].trim().toLowerCase();
+  return MEDIA_EXT[t] || (/^video\//.test(t) ? "mp4" : "mp3");
+}
+async function mediaBytes(env, job) {
+  if (job.mailId) {
+    if (job.size > MEDIA_MAX) return null;
+    return attachmentBytes(env, job.mailId, job.attId);
+  }
+  const url = job.res ? `${G.chat}media/${job.res.split("/").map(encodeURIComponent).join("/")}?alt=media` : `${DRIVE}files/${job.drive}?alt=media`;
+  const r = await fetch(url, { headers: { Authorization: "Bearer " + (await accessToken(env)) } });
+  if (!r.ok) throw new Error("download " + r.status);
+  if ((+r.headers.get("content-length") || 0) > MEDIA_MAX) return null;
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  return bytes.length > MEDIA_MAX ? null : bytes;
+}
+async function uploadMedia(env, file, bytes, ext) {
+  const fd = new FormData();
+  fd.append("token", env.YM_TOKEN);
+  fd.append("path", `ivr2:${file}.wav`);
+  fd.append("convertAudio", "1");
+  fd.append("file", new Blob([bytes], { type: "application/octet-stream" }), `media.${ext}`);
+  const r = await fetch(YM + "UploadFile", { method: "POST", body: fd, signal: AbortSignal.timeout(300000) });
+  const u = await r.json().catch(() => ({ responseStatus: "HTTP " + r.status }));
+  if (u.responseStatus !== "OK") throw new Error("upload: " + (u.message || u.responseStatus));
+}
+// קובץ גדול עולה ל-Gemini דרך ה-Files API (בבקשה רגילה מותר עד 20 מגה כולל הקידוד)
+async function geminiUpload(env, bytes, mime) {
+  const base = "https://generativelanguage.googleapis.com";
+  const start = await fetch(`${base}/upload/v1beta/files?key=${env.GEMINI_KEY}`, {
+    method: "POST",
+    headers: { "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start", "X-Goog-Upload-Header-Content-Length": String(bytes.length), "X-Goog-Upload-Header-Content-Type": mime, "content-type": "application/json" },
+    body: JSON.stringify({ file: { display_name: "phone-media" } }),
+  });
+  const upUrl = start.headers.get("x-goog-upload-url");
+  if (!upUrl) throw new Error("gemini upload start " + start.status);
+  const j = await (await fetch(upUrl, { method: "POST", headers: { "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" }, body: bytes, signal: AbortSignal.timeout(300000) })).json();
+  let f = j.file;
+  if (!f?.uri) throw new Error("gemini upload " + JSON.stringify(j).slice(0, 150));
+  for (let i = 0; f.state === "PROCESSING" && i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    f = await (await fetch(`${base}/v1beta/${f.name}?key=${env.GEMINI_KEY}`)).json();
+  }
+  if (f.state && f.state !== "ACTIVE") throw new Error("gemini file " + f.state);
+  return f.uri;
+}
+async function mediaWords(env, bytes, ext) {
+  if (!env.GEMINI_KEY) throw new Error("no GEMINI_KEY");
+  const mime = GEMINI_MEDIA[ext] || "audio/mp3";
+  const media = bytes.length <= 14e6 ? { inline_data: { mime_type: mime, data: b64(bytes) } } : { file_data: { mime_type: mime, file_uri: await geminiUpload(env, bytes, mime) } };
+  const prompt = "כתוב בעברית את כל מה שנאמר בקובץ, מההתחלה ועד הסוף, כמו תמלול מלא. אם הדיבור בשפה אחרת, תרגם לעברית. אל תתאר מה רואים, רק מה שנאמר. אם יש שירה או מוזיקה בלי דיבור, כתוב רק שמדובר בשיר או במוזיקה. אם לא נאמר כלום, כתוב: לא נאמר כלום בקובץ. " + SPOKEN;
+  let last = "";
+  for (const m of ["gemini-flash-latest", "gemini-flash-lite-latest"]) {
+    try {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${env.GEMINI_KEY}`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ contents: [{ role: "user", parts: [media, { text: prompt }] }], generationConfig: { mediaResolution: "MEDIA_RESOLUTION_LOW", maxOutputTokens: 8000, temperature: 0.2 } }),
+        signal: AbortSignal.timeout(240000),
+      });
+      const j = await r.json();
+      bump(env, "gemini");
+      const t = j?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("").trim();
+      if (t) return t;
+      last = j?.error?.message || "empty";
+    } catch (e) { last = e.message; }
+  }
+  throw new Error(last);
+}
+async function runFileJob(env, job) {
+  // מזהה הקובץ במייל משתנה בין בקשות, לכן המפתח למטמון הוא המייל + שם הקובץ + הגודל
+  const key = (await sha(job.mailId ? `gmail:${job.mailId}:${job.name}:${job.size}` : job.res || job.drive)).slice(0, 16);
+  const file = "/Media/" + key, words = job.mode === "words";
+  if (!words && (await env.KV.get("media:" + key))) return { kind: "play", file };
+  if (words) { const c = await env.KV.get("mw:" + key); if (c) return { kind: "say", text: c }; }
+  const bytes = await mediaBytes(env, job);
+  if (!bytes) return { kind: "say", text: "הקובץ גדול מדי להשמעה בטלפון." };
+  const ext = mediaExt(job.name, job.mime);
+  if (!words) {
+    try {
+      await uploadMedia(env, file, bytes, ext);
+      await env.KV.put("media:" + key, "1", { expirationTtl: 30 * 86400 });
+      return { kind: "play", file };
+    } catch (e) { await logEvent(env, `המרת ${VIDEO_EXT.test(ext) ? "סרטון" : "הקלטה"} לשמע נכשלה (${ext}, ${Math.round(bytes.length / 1024)} קילובייט): ${e.message}`); }
+  }
+  try {
+    const t = await mediaWords(env, bytes, ext);
+    await env.KV.put("mw:" + key, t, { expirationTtl: 30 * 86400 });
+    return { kind: "say", text: words ? t : "לא הצלחתי להשמיע את הקול המקורי, לכן הנה מה שנאמר בקובץ. " + t };
+  } catch (e) {
+    await logEvent(env, "תמלול קובץ שמע או וידאו נכשל: " + e.message);
+    return { kind: "say", text: words ? "לא הצלחתי לתמלל את הקובץ." : "לא הצלחתי להכין את הקובץ לשמיעה." };
+  }
+}
 async function runMediaJob(env, job) {
   if (job.type === "recsave") return runRecSave(env, job);
-  if (job.type === "file") {
-    const key = (await sha(job.res || job.drive)).slice(0, 16);
-    const file = "/Media/" + key;
-    if (await env.KV.get("media:" + key)) return { kind: "play", file };
-    const url = job.res ? `${G.chat}media/${job.res.split("/").map(encodeURIComponent).join("/")}?alt=media` : `${DRIVE}files/${job.drive}?alt=media`;
-    const r = await fetch(url, { headers: { Authorization: "Bearer " + (await accessToken(env)) } });
-    if (!r.ok) throw new Error("download " + r.status);
-    const len = +r.headers.get("content-length") || 0;
-    if (len > 45e6) return { kind: "say", text: "הקובץ גדול מדי להשמעה בטלפון." };
-    const bytes = new Uint8Array(await r.arrayBuffer());
-    if (bytes.length > 45e6) return { kind: "say", text: "הקובץ גדול מדי להשמעה בטלפון." };
-    const fd = new FormData();
-    fd.append("token", env.YM_TOKEN);
-    fd.append("path", `ivr2:${file}.wav`);
-    fd.append("convertAudio", "1");
-    fd.append("file", new Blob([bytes], { type: job.mime || "application/octet-stream" }), job.name || "media.mp4");
-    const u = await (await fetch(YM + "UploadFile", { method: "POST", body: fd })).json();
-    if (u.responseStatus !== "OK") throw new Error("upload: " + (u.message || u.responseStatus));
-    await env.KV.put("media:" + key, "1", { expirationTtl: 30 * 86400 });
-    return { kind: "play", file };
-  }
+  if (job.type === "file") return runFileJob(env, job);
   if (job.type === "youtube") {
     if (!env.GEMINI_KEY) return { kind: "say", text: "השמעת סרטוני יוטיוב לא זמינה כרגע." };
     const ck = `yt:${job.id}:${job.mode}`;
@@ -2832,10 +2929,10 @@ async function runMediaJob(env, job) {
 }
 async function startMediaJob(ctx, st, job) {
   const id = "mj" + st.n;
-  st.media = { ...(st.media || {}), job: id, polls: 0 };
+  st.media = { ...(st.media || {}), job: id, polls: 0, ...(job.type === "file" ? { fileJob: job } : {}) };
   await startBgJob(ctx, id, job);
   st.step = "mediaWait";
-  return mediaWaitPrompt(st, job.type === "youtube" ? "מכין את הסרטון. זה יכול לקחת עד כמה דקות" : job.type === "recsave" ? "שומר ומתמלל, זה יכול לקחת קצת זמן" : "מכין את הקובץ לשמיעה, רגע");
+  return mediaWaitPrompt(st, job.type === "youtube" ? "מכין את הסרטון. זה יכול לקחת עד כמה דקות" : job.type === "recsave" ? "שומר ומתמלל, זה יכול לקחת קצת זמן" : job.mode === "words" ? "מתמלל את הקובץ, זה יכול לקחת קצת זמן" : "מכין את הקובץ לשמיעה, רגע");
 }
 function mediaWaitPrompt(st, text = "") {
   st.media.music = ((st.media.music || 0) % 3) + 1;
@@ -2911,8 +3008,9 @@ H.mediaPlay = async (st, input, ctx) => {
   if (input === undefined || input === "1") {
     st.step = "mediaPlay";
     const v = nextVal(st);
-    return `read=f-${st.media.file}.${sp("לשמיעה חוזרת הקש 1. לחזרה הקש 0.", "m")}=${v},no,1,1,10,No,no,no,,0.1.*,,Ok,none,`;
+    return `read=f-${st.media.file}.${sp("לשמיעה חוזרת הקש 1. לשמיעת מה שנאמר בקובץ במילים, אם הקול לא ברור, הקש 2. לחזרה הקש 0.", "m")}=${v},no,1,1,10,No,no,no,,0.1.2.*,,Ok,none,`;
   }
+  if (input === "2" && st.media.fileJob) return startMediaJob(ctx, st, { ...st.media.fileJob, mode: "words" });
   return mediaBack(st, ctx);
 };
 H.mediaText = async (st, input, ctx) => {
@@ -3400,6 +3498,7 @@ async function runRecSave(env, job) {
 }
 
 // ---- קבצים ששותפו איתי לאחרונה
+const isDriveMedia = (f) => /^(audio|video)\//.test(f.mime || "");
 H.sharedWithMe = async (st, input, ctx) => {
   const env = ctx.env;
   if (input === undefined) {
@@ -3414,10 +3513,15 @@ H.sharedWithMe = async (st, input, ctx) => {
   const f = st.shared?.[+input - 1];
   if (!f) return go(st, "filesMenu", undefined, ctx);
   st.sharedCur = f; st.step = "sharedMenu";
+  if (isDriveMedia(f)) return R.menu(st, `${/^video\//.test(f.mime) ? "סרטון" : "הקלטה"}, ${await heb(env, f.name)}. לשמיעה הקש 1. לשליחה לאדם אחר הקש 2. לחזרה הקש 0.`, "0.1.2");
   return R.menu(st, `${await heb(env, f.name)}. להקראה או סיכום הקש 1. לשליחה לאדם אחר הקש 2. לחזרה הקש 0.`, "0.1.2");
 };
 H.sharedMenu = async (st, input, ctx) => {
   const f = st.sharedCur;
+  if (input === "1" && isDriveMedia(f)) {
+    st.media = { back: "files" };
+    return startMediaJob(ctx, st, { type: "file", drive: f.id, mime: f.mime, name: f.name });
+  }
   if (input === "1") {
     const t = await ACTIONS.read_drive_file.run(ctx.env, { id: f.id }).catch(() => "לא הצלחתי לקרוא את הקובץ.");
     st.media = { back: "files", pages: chunkText(t, 2000), page: 0 };
