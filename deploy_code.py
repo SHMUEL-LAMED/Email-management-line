@@ -23,6 +23,10 @@ try:
 except urllib.error.HTTPError as e:
     r = json.load(e)
 print("upload:", r.get("success"), r.get("errors"))
+if not r.get("success"):
+    sys.exit(1)
+if "--code-only" in sys.argv[1:]:
+    sys.exit(0)
 # משימה מתוזמנת של Cloudflare: כל 15 דקות (דחיות מייל, סיכום יומי בערב)
 req = urllib.request.Request(f"https://api.cloudflare.com/client/v4/accounts/{ACC}/workers/scripts/{NAME}/schedules", data=json.dumps([{"cron": "*/15 * * * *"}]).encode(), method="PUT",
                              headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
@@ -31,3 +35,5 @@ try:
 except urllib.error.HTTPError as e:
     r = json.load(e)
 print("cron:", r.get("success"), r.get("errors"))
+if not r.get("success"):
+    sys.exit(1)
