@@ -449,7 +449,7 @@ async function gmailMarkRead(env, id) {
 }
 const encHeader = (s) => /^[\x20-\x7e]*$/.test(s) ? s : `=?UTF-8?B?${utf8b64(s)}?=`;
 const wrap76 = (s) => s.replace(/(.{76})/g, "$1\r\n");
-async function gmailSend(env, { to, subject, body, threadId, inReplyTo, refs, att, cc }) {
+async function gmailSend(env, { to, subject, body, threadId, inReplyTo, refs, att, cc, html }) {
   const lines = [`To: ${to}`, cc ? `Cc: ${cc}` : "", `Subject: ${encHeader(subject)}`, "MIME-Version: 1.0"].filter(Boolean);
   if (inReplyTo) {
     lines.push(`In-Reply-To: ${inReplyTo}`);
@@ -461,6 +461,12 @@ async function gmailSend(env, { to, subject, body, threadId, inReplyTo, refs, at
     lines.push(`Content-Type: multipart/mixed; boundary="${b}"`);
     raw = lines.join("\r\n") + "\r\n\r\n" + [`--${b}`, 'Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: base64", "", wrap76(utf8b64(body)),
       `--${b}`, `Content-Type: ${att.mime || "application/octet-stream"}; name="${encHeader(att.name)}"`, "Content-Transfer-Encoding: base64", `Content-Disposition: attachment; filename="${encHeader(att.name)}"`, "", wrap76(b64(att.bytes)), `--${b}--`, ""].join("\r\n");
+  } else if (html) {
+    // טקסט רגיל + גרסה מעוצבת (HTML); תוכנת המייל מציגה את המעוצבת
+    const b = "a" + randKey(16);
+    lines.push(`Content-Type: multipart/alternative; boundary="${b}"`);
+    raw = lines.join("\r\n") + "\r\n\r\n" + [`--${b}`, 'Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: base64", "", wrap76(utf8b64(body)),
+      `--${b}`, 'Content-Type: text/html; charset="UTF-8"', "Content-Transfer-Encoding: base64", "", wrap76(utf8b64(html)), `--${b}--`, ""].join("\r\n");
   } else {
     lines.push('Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: base64");
     raw = lines.join("\r\n") + "\r\n\r\n" + wrap76(utf8b64(body));
@@ -3836,15 +3842,75 @@ async function markClaudeMailDone(env, ...ids) {
 async function claudeEmailReply(env, id, text) {
   const m = await gmailGet(env, id);
   const subject = /^re:/i.test(m.subject) ? m.subject : "Re: " + m.subject;
-  const sent = await gmailSend(env, { to: env.BUSINESS_EMAIL, subject, body: text, threadId: m.threadId, inReplyTo: m.msgId, refs: m.refs });
+  const sent = await gmailSend(env, { to: env.BUSINESS_EMAIL, subject, body: text, html: claudeMailHtml([{ text }]), threadId: m.threadId, inReplyTo: m.msgId, refs: m.refs });
   await markClaudeMailDone(env, id, sent.id);
   await logEvent(env, "קלאוד ענה במייל: " + trimText(text, 100));
   return sent;
 }
+// ---- עיצוב המיילים מקלאוד: הופך טקסט (עם Markdown קל) למייל מעוצב מימין לשמאל
+const escHtml = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function inlineMd(t) {
+  return escHtml(t)
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*(?!\s)(.+?)\*(?=[\s).,!?:]|$)/g, "$1<i>$2</i>")
+    .replace(/`([^`]+)`/g, '<code style="background:#f1f3f4;padding:1px 5px;border-radius:4px;font-family:monospace;direction:ltr;unicode-bidi:embed">$1</code>')
+    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" style="color:#1a73e8">$1</a>');
+}
+function mdToHtml(text) {
+  const out = [];
+  let list = null, para = [];
+  const flushPara = () => { if (para.length) { out.push(`<p style="margin:0 0 14px">${para.map(inlineMd).join("<br>")}</p>`); para = []; } };
+  const flushList = () => { if (list) { out.push(`<${list.tag} style="margin:0 0 14px;padding-right:22px;padding-left:0">${list.items.map((i) => `<li style="margin:0 0 6px">${inlineMd(i)}</li>`).join("")}</${list.tag}>`); list = null; } };
+  for (const raw of String(text).replace(/\r/g, "").split("\n")) {
+    const line = raw.trimEnd();
+    let m;
+    if (!line.trim()) { flushPara(); flushList(); continue; }
+    if ((m = line.match(/^\s*(#{1,3})\s+(.*)$/))) {
+      flushPara(); flushList();
+      const sz = { 1: 21, 2: 18, 3: 16 }[m[1].length];
+      out.push(`<div style="font-size:${sz}px;font-weight:bold;color:#1f3a5f;margin:18px 0 8px;border-bottom:${m[1].length === 1 ? "2px solid #d97757" : "none"};padding-bottom:${m[1].length === 1 ? 4 : 0}px">${inlineMd(m[2])}</div>`);
+      continue;
+    }
+    if ((m = line.match(/^\s*([-*•])\s+(.*)$/)) || (m = line.match(/^\s*(\d+)[.)]\s+(.*)$/))) {
+      flushPara();
+      const tag = /\d/.test(m[1]) ? "ol" : "ul";
+      if (!list || list.tag !== tag) { flushList(); list = { tag, items: [] }; }
+      list.items.push(m[2]);
+      continue;
+    }
+    if (/^\s*(-{3,}|_{3,})\s*$/.test(line)) { flushPara(); flushList(); out.push('<hr style="border:none;border-top:1px solid #e0e0e0;margin:16px 0">'); continue; }
+    flushList();
+    // שורה שמסתיימת בנקודתיים ונראית כמו כותרת קצרה
+    if (/^[^.!?]{2,40}:$/.test(line.trim()) && !para.length) { out.push(`<div style="font-weight:bold;color:#1f3a5f;margin:10px 0 6px">${inlineMd(line.trim())}</div>`); continue; }
+    para.push(line.trim());
+  }
+  flushPara(); flushList();
+  return out.join("\n");
+}
+function claudeMailHtml(parts) {
+  // parts: [{title?, text, muted?}]
+  const blocks = parts.filter((p) => p.text).map((p) => `
+    <div style="margin:0 0 18px;${p.muted ? "background:#f6f7f9;border-right:4px solid #c5cad3;padding:12px 16px;border-radius:6px;color:#444" : ""}">
+      ${p.title ? `<div style="font-size:13px;font-weight:bold;color:${p.muted ? "#666" : "#d97757"};margin:0 0 8px">${escHtml(p.title)}</div>` : ""}
+      ${mdToHtml(p.text)}
+    </div>`).join("");
+  return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;padding:0;background:#f2f2f2">
+<div dir="rtl" style="max-width:640px;margin:0 auto;padding:16px;font-family:Arial,'Segoe UI',sans-serif;font-size:15px;line-height:1.7;color:#222;text-align:right">
+  <div style="background:#ffffff;border-radius:10px;overflow:hidden;border:1px solid #e3e3e3">
+    <div style="background:#1f3a5f;color:#fff;padding:12px 18px;font-size:16px;font-weight:bold">✳ תשובה מקלאוד</div>
+    <div style="padding:18px 20px">${blocks}</div>
+    <div style="border-top:1px solid #eee;padding:10px 18px;font-size:12px;color:#888">אפשר להשיב למייל הזה, והתשובה תגיע לקלאוד.</div>
+  </div>
+</div></body></html>`;
+}
 // עותק במייל של תשובה שקלאוד נתן בקו
 async function mailCopyOfAnswer(env, question, answer) {
   try {
-    const r = await gmailSend(env, { to: env.BUSINESS_EMAIL, subject: CL_COPY_SUBJECT, body: `${question ? "השאלה שלך:\n" + question + "\n\n" : ""}התשובה:\n${answer}\n\n(אפשר להשיב למייל הזה, והתשובה תגיע לקלאוד)` });
+    const r = await gmailSend(env, {
+      to: env.BUSINESS_EMAIL, subject: CL_COPY_SUBJECT,
+      body: `${question ? "השאלה שלך:\n" + question + "\n\n" : ""}התשובה:\n${answer}\n\n(אפשר להשיב למייל הזה, והתשובה תגיע לקלאוד)`,
+      html: claudeMailHtml([{ title: "השאלה שלך (מהקו)", text: question, muted: true }, { title: "התשובה", text: answer }]),
+    });
     if (r?.id) await markClaudeMailDone(env, r.id);
   } catch (e) { await logEvent(env, "עותק במייל נכשל: " + e.message); }
 }
@@ -4175,4 +4241,4 @@ export default {
 };
 
 // לבדיקות
-export { isShabbatIL, sunsetIL, saveMailToDrive, H, say, bodyOf, parseAddr, handleYemot, findPeople, toHebrew, transcribe, geminiTools, aiSystem, runMediaJob, scheduledTick, claudeMails, renderSpeech, chunkText };
+export { claudeMailHtml, isShabbatIL, sunsetIL, saveMailToDrive, H, say, bodyOf, parseAddr, handleYemot, findPeople, toHebrew, transcribe, geminiTools, aiSystem, runMediaJob, scheduledTick, claudeMails, renderSpeech, chunkText };
