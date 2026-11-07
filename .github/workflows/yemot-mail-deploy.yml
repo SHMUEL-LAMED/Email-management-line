@@ -1,0 +1,45 @@
+name: Check and deploy yemot-mail
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Check syntax and run simulations
+        run: |
+          node --input-type=module --check < worker.js
+          for test_file in test/*.mjs; do
+            node "$test_file" || exit 1
+          done
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: check
+    runs-on: ubuntu-latest
+    concurrency:
+      group: yemot-mail-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - name: Deploy the current main commit
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+        run: |
+          current_head=$(git ls-remote --exit-code origin refs/heads/main)
+          if [ "${current_head%%[[:space:]]*}" != "$GITHUB_SHA" ]; then
+            echo "Skipping an older main commit"
+            exit 0
+          fi
+          python3 deploy_code.py --code-only
