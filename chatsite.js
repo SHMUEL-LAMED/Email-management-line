@@ -93,6 +93,12 @@ async function lastMessages(env, space, n) {
   const j = await gapi(env, `${CHAT}${space}/messages?pageSize=${n}&orderBy=${encodeURIComponent("createTime desc")}`);
   return (j.messages || []).reverse();
 }
+async function threadMessages(env, space, thread) {
+  const f = encodeURIComponent(`thread.name = ${thread}`);
+  const j = await gapi(env, `${CHAT}${space}/messages?pageSize=200&filter=${f}&orderBy=${encodeURIComponent("createTime asc")}`);
+  return j.messages || [];
+}
+const threadOk = (space, t) => typeof t === "string" && t.startsWith(space + "/threads/") && /^spaces\/[\w-]+\/threads\/[\w-]+$/.test(t);
 const markRead = (env, space) => gapi(env, `${CHAT}users/me/${space}/spaceReadState?updateMask=lastReadTime`, { method: "PATCH", body: { lastReadTime: new Date().toISOString() } });
 async function summarize(env, text) {
   const system = "סכם בעברית, בקצרה ובנקודות, את השיחה הבאה מצאט: מה נדון, מה סוכם, ומה מחכה לתשובה ממני.";
@@ -170,21 +176,46 @@ export async function chatSiteApi(req, env, url) {
       }));
       return J({ spaces: list });
     }
-    if (op === "messages") {
+    if (op === "messages" || op === "thread") {
       const space = url.searchParams.get("space");
       if (!spaceOk(space)) return J({ error: "שיחה לא תקינה" }, 400);
+      const thread = url.searchParams.get("thread") || "";
+      if (op === "thread" && !threadOk(space, thread)) return J({ error: "שרשור לא תקין" }, 400);
       const me = await myUserId(env);
-      const [raw, names] = await Promise.all([lastMessages(env, space, 50), members(env, space)]);
+      const [raw, names] = await Promise.all([op === "thread" ? threadMessages(env, space, thread) : lastMessages(env, space, 80), members(env, space)]);
+      // בתצוגה הראשית: רק הודעות פותחות, ולכל אחת מספר התגובות בשרשור
+      const replies = {};
+      if (op === "messages") for (const m of raw) if (m.threadReply && m.thread?.name) replies[m.thread.name] = (replies[m.thread.name] || 0) + 1;
       const msgs = [];
       for (const m of raw) {
+        if (op === "messages" && m.threadReply) continue;
         const u = m.sender?.name || "";
-        msgs.push({ id: m.name || "", mine: u === "users/" + me, who: names[u] || (await userName(env, u)), text: String(m.text || m.formattedText || ""), at: m.createTime || "", atts: (m.attachment || []).map((a) => a.contentName || "קובץ") });
+        msgs.push({
+          id: m.name || "", mine: u === "users/" + me, who: names[u] || (await userName(env, u)),
+          text: String(m.text || m.formattedText || ""), at: m.createTime || "",
+          thread: m.thread?.name || "", replies: replies[m.thread?.name] || 0,
+          reacts: (m.emojiReactionSummaries || []).map((r) => ({ e: r.emoji?.unicode || (r.emoji?.customEmoji ? "🙂" : ""), n: r.reactionCount || 1 })).filter((r) => r.e),
+          atts: (m.attachment || []).map((a) => ({ name: a.contentName || "קובץ", type: a.contentType || "", ref: a.attachmentDataRef?.resourceName || "", drive: a.driveDataRef?.driveFileId || "" })),
+        });
       }
       return J({ messages: msgs });
     }
+    if (op === "file") {
+      // הורדת קובץ שצורף בצאט (דרך ה-API של גוגל, עם אותו חיבור)
+      const ref = url.searchParams.get("ref") || "";
+      if (!ref || ref.length > 3000 || ref.includes("..")) return J({ error: "קובץ לא תקין" }, 400);
+      const name = String(url.searchParams.get("name") || "file").replace(/["\r\n]/g, "").slice(0, 150);
+      const tok2 = await accessToken(env);
+      const r = await fetch(`${CHAT}media/${ref}?alt=media`, { headers: { Authorization: "Bearer " + tok2 } });
+      if (!r.ok) return J({ error: "לא הצלחתי להוריד את הקובץ" }, 502);
+      return new Response(r.body, { headers: { ...cors, "content-type": r.headers.get("content-type") || "application/octet-stream", "content-disposition": "inline; filename*=UTF-8''" + encodeURIComponent(name), "cache-control": "no-store" } });
+    }
     if (op === "send") {
       if (!spaceOk(body.space) || !String(body.text || "").trim()) return J({ error: "חסר טקסט או שיחה" }, 400);
-      const r = await gapi(env, `${CHAT}${body.space}/messages`, { body: { text: String(body.text).slice(0, 4000) } });
+      if (body.thread && !threadOk(body.space, body.thread)) return J({ error: "שרשור לא תקין" }, 400);
+      const msg = { text: String(body.text).slice(0, 4000) };
+      if (body.thread) msg.thread = { name: body.thread };
+      const r = await gapi(env, `${CHAT}${body.space}/messages` + (body.thread ? "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" : ""), { body: msg });
       await markRead(env, body.space).catch(() => {});
       return J({ ok: true, id: r.name || "" });
     }
