@@ -1,13 +1,96 @@
 // נקודת הכניסה שעולה ל-Cloudflare: כל הקו (worker.js) כמו שהוא, ובנוסף ה-API של אתר הצאט (chatsite.js)
-import worker from "./worker.js";
+// והשיחה עם Claude מאתר הצאט (chat/claude.html): ההודעות נכנסות לתור של הקו (kind "site"),
+// והתשובות נשארות באתר – לא מוקראות בקו ולא נשלחות כעותק במייל.
+import worker, { CallState as BaseCallState } from "./worker.js";
 import { chatSiteApi } from "./chatsite.js";
 export * from "./worker.js";
+
+const ORIGIN = "https://shmuel-lamed.github.io";
+
+// ה-DO של הגשר: שתי פעולות נוספות מעל מה שיש ב-worker.js
+export class CallState extends BaseCallState {
+  async fetch(req) {
+    const path = new URL(req.url).pathname;
+    const st = this.state.storage;
+    if (path === "/bridge/site") {
+      const msgs = (await st.get("msgs")) || [];
+      const answers = (await st.get("answers")) || [];
+      const live = (await st.get("live")) || { on: false, at: 0 };
+      const mine = msgs.filter((m) => m.kind === "site").slice(-40);
+      const ids = new Set(mine.map((m) => m.id));
+      const items = [
+        ...mine.map((m) => ({ id: m.id, from: "me", text: m.text, at: m.at, status: m.status })),
+        ...answers.filter((a) => ids.has(a.re)).map((a) => ({ id: a.id, from: "claude", re: a.re, text: a.text, confirm: a.confirm || "", at: a.at })),
+      ].sort((x, y) => x.at - y.at);
+      return new Response(JSON.stringify({ items, live: live.on && Date.now() - live.at < 120e3 }));
+    }
+    if (path === "/bridge/kind") {
+      const b = await req.json().catch(() => ({}));
+      const m = ((await st.get("msgs")) || []).find((x) => x.id === b.re);
+      return new Response(JSON.stringify({ kind: m?.kind || "" }));
+    }
+    if (path === "/bridge/answer") {
+      // תשובה להודעה מהאתר: מסומנת כ"נשמעה" כדי שהקו לא יקריא אותה
+      const raw = await req.text();
+      const res = await super.fetch(new Request(req.url, { method: "POST", body: raw }));
+      const b = JSON.parse(raw || "{}");
+      const msgs = (await st.get("msgs")) || [];
+      if (b.re && msgs.some((m) => m.id === b.re && m.kind === "site")) {
+        const answers = (await st.get("answers")) || [];
+        const out = await res.clone().json().catch(() => ({}));
+        const a = answers.find((x) => x.id === out.id);
+        if (a) { a.heard = true; a.site = true; await st.put("answers", answers); }
+      }
+      return res;
+    }
+    return super.fetch(req);
+  }
+}
+
+const bridgeDo = async (env, op, body) => {
+  const r = await env.CALLS.get(env.CALLS.idFromName("claude-bridge")).fetch("https://do/bridge/" + op, { method: "POST", body: JSON.stringify(body || {}) });
+  return r.json();
+};
+async function sha(s) {
+  const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(s)));
+  return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function claudeSiteApi(req, env, url) {
+  const cors = { "access-control-allow-origin": ORIGIN, "access-control-allow-headers": "content-type, x-chat-token", "access-control-allow-methods": "GET, POST, OPTIONS", vary: "origin" };
+  const J = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...cors } });
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+  const tok = req.headers.get("x-chat-token") || "";
+  if (!tok || !(await env.KV.get("cs:tok:" + (await sha(tok))))) return J({ error: "צריך להיכנס מחדש" }, 401);
+  const op = url.pathname.split("/")[2];
+  try {
+    if (op === "claude_send") {
+      const body = await req.json().catch(() => ({}));
+      const text = String(body.text || "").trim();
+      if (!text) return J({ error: "חסר טקסט" }, 400);
+      const r = await bridgeDo(env, "add", { text: text.slice(0, 4000), kind: "site" });
+      return J({ ok: true, id: r.id });
+    }
+    return J(await bridgeDo(env, "site"));
+  } catch (e) {
+    return J({ error: "שגיאה בשרת" }, 500);
+  }
+}
 
 export default {
   ...worker,
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    if (url.pathname === "/chatsite/claude_send" || url.pathname === "/chatsite/claude_history") return claudeSiteApi(req, env, url);
     if (url.pathname.startsWith("/chatsite/")) return chatSiteApi(req, env, url);
+    if (url.pathname === "/bridge/answer" && req.method === "POST" && env.CALLS) {
+      // תשובה לשיחה מהאתר: בלי עותק במייל
+      const raw = await req.text();
+      let b = {};
+      try { b = JSON.parse(raw); } catch {}
+      if (b.re && (await bridgeDo(env, "kind", { re: b.re })).kind === "site") b.mail_copy = false;
+      req = new Request(req.url, { method: "POST", headers: req.headers, body: JSON.stringify(b) });
+    }
     return worker.fetch(req, env, ctx);
   },
 };
