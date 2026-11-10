@@ -77,14 +77,29 @@ async function userName(env, userRes) {
   return n || "משתתף";
 }
 const isDM = (s) => s.spaceType === "DIRECT_MESSAGE" || s.type === "DM";
-async function members(env, space) {
-  const map = {};
+async function memberList(env, space) {
+  const out = [];
   try {
     const j = await gapi(env, `${CHAT}${space}/members?pageSize=200`);
-    for (const m of j.memberships || []) { const u = m.member; if (u?.name) map[u.name] = u.displayName || (u.email ? u.email.split("@")[0] : ""); }
+    for (const m of j.memberships || []) {
+      const u = m.member;
+      if (u?.name && u.type !== "BOT") out.push({ uid: u.name, mid: m.name || "", name: u.displayName || (u.email ? u.email.split("@")[0] : ""), manager: m.role === "ROLE_MANAGER" });
+    }
   } catch {}
+  return out;
+}
+async function members(env, space) {
+  const map = {};
+  for (const m of await memberList(env, space)) map[m.uid] = m.name;
   return map;
 }
+// שם שחסר ברשימת החברים (גוגל לא תמיד מחזיר אותו) מושלם מאנשי הקשר
+async function namedMembers(env, space) {
+  const list = await memberList(env, space);
+  await Promise.all(list.map(async (m) => { if (!m.name) m.name = await userName(env, m.uid); }));
+  return list;
+}
+const snippet = (m) => String(m?.text || "").replace(/\s+/g, " ").trim().slice(0, 90) || (m?.attachment?.length ? "📎 " + (m.attachment[0].contentName || "קובץ") : "");
 async function readState(env, space) {
   try { return (await gapi(env, `${CHAT}users/me/${space}/spaceReadState`)).lastReadTime || "1970-01-01T00:00:00Z"; }
   catch { return "1970-01-01T00:00:00Z"; }
@@ -109,6 +124,8 @@ async function ownMessage(env, name) {
   return !!me && m.sender?.name === "users/" + me;
 }
 const MAX_UPLOAD = 8 * 1024 * 1024;
+const MAX_FILES = 5;
+const cleanName = (n) => String(n || "").replace(/[\r\n\0]/g, " ").trim().slice(0, 80);
 function b64bytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -207,7 +224,9 @@ export async function chatSiteApi(req, env, url) {
 
     if (op === "spaces") {
       const me = await myUserId(env);
-      const mute = await kvJson(env, "mute", []);
+      const [mute, pins] = await Promise.all([kvJson(env, "mute", []), kvJson(env, "cs:pins", [])]);
+      // תצוגה מקדימה של ההודעה האחרונה נשמרת ב-KV ומתחדשת רק לשיחה שהשתנתה, ולא יותר מכמה בכל בקשה
+      let budget = 8;
       const j = await gapi(env, `${CHAT}spaces?pageSize=1000`);
       const spaces = (j.spaces || []).sort((a, b) => String(b.lastActiveTime || "").localeCompare(String(a.lastActiveTime || ""))).slice(0, 40);
       const list = await Promise.all(spaces.map(async (s) => {
@@ -220,8 +239,21 @@ export async function chatSiteApi(req, env, url) {
             if (title) await env.KV.put(ck, title, { expirationTtl: 7 * 86400 });
           }
         }
-        const lr = await readState(env, s.name);
-        return { space: s.name, dm: isDM(s), title: title || (isDM(s) ? "איש קשר" : "קבוצה בלי שם"), last: s.lastActiveTime || "", unread: !!(s.lastActiveTime && s.lastActiveTime > lr), muted: mute.includes(s.name) };
+        const [lr, cached] = await Promise.all([readState(env, s.name), kvJson(env, "cs:prev:" + s.name, null)]);
+        let prev = cached;
+        if (s.lastActiveTime && (!prev || prev.t !== s.lastActiveTime) && budget-- > 0) {
+          try {
+            const m = (await lastMessages(env, s.name, 1)).at(-1);
+            const u = m?.sender?.name || "";
+            prev = { t: s.lastActiveTime, text: snippet(m), who: !m ? "" : u === "users/" + me ? "אתה" : isDM(s) ? "" : await userName(env, u) };
+            await env.KV.put("cs:prev:" + s.name, JSON.stringify(prev), { expirationTtl: 30 * 86400 });
+          } catch {}
+        }
+        return {
+          space: s.name, dm: isDM(s), title: title || (isDM(s) ? "איש קשר" : "קבוצה בלי שם"), last: s.lastActiveTime || "",
+          unread: !!(s.lastActiveTime && s.lastActiveTime > lr), muted: mute.includes(s.name), pinned: pins.includes(s.name),
+          preview: prev?.text || "", previewWho: prev?.who || "",
+        };
       }));
       return J({ spaces: list });
     }
@@ -244,12 +276,21 @@ export async function chatSiteApi(req, env, url) {
       const replies = {};
       if (op === "messages") for (const m of raw) if (m.threadReply && m.thread?.name) replies[m.thread.name] = (replies[m.thread.name] || 0) + 1;
       const msgs = [];
+      const byName = Object.fromEntries(raw.map((m) => [m.name, m]));
+      const nameOf = async (u) => names[u] || (await userName(env, u));
       for (const m of raw) {
         if (op === "messages" && m.threadReply) continue;
         const u = m.sender?.name || "";
+        const text = String(m.text || m.formattedText || "");
+        // fmt: הטקסט עם סימוני העיצוב של גוגל (*מודגש*, _נטוי_...), ואזכורים בשמות במקום במזהים
+        const fmt = String(m.formattedText || "").replace(/<users\/([\w-]+)>/g, (_, id) => "@" + (id === "all" ? "כולם" : names["users/" + id] || "משתתף"));
+        const qn = m.quotedMessageMetadata?.name || "";
+        const qm = qn ? byName[qn] : null;
         msgs.push({
-          id: m.name || "", mine: u === "users/" + me, who: names[u] || (await userName(env, u)),
-          text: String(m.text || m.formattedText || ""), at: m.createTime || "",
+          id: m.name || "", mine: u === "users/" + me, who: await nameOf(u),
+          text, fmt: fmt && fmt !== text ? fmt : "", at: m.createTime || "", upd: m.lastUpdateTime || m.createTime || "",
+          toMe: (m.annotations || []).some((a) => a.type === "USER_MENTION" && (a.userMention?.user?.name === "users/" + me || a.userMention?.type === "ALL" || a.userMention?.user?.name === "users/all")),
+          quote: qn ? { id: qn, text: qm ? snippet(qm) : "", who: qm ? await nameOf(qm.sender?.name || "") : "" } : null,
           edited: !!(m.lastUpdateTime && m.lastUpdateTime !== m.createTime && !m.deleteTime),
           thread: m.thread?.name || "", replies: replies[m.thread?.name] || 0,
           reacts: (m.emojiReactionSummaries || []).map((r) => ({ e: r.emoji?.unicode || (r.emoji?.customEmoji ? "🙂" : ""), n: r.reactionCount || 1 })).filter((r) => r.e),
@@ -270,21 +311,41 @@ export async function chatSiteApi(req, env, url) {
       return new Response(r.body, { headers: { ...cors, "content-type": r.headers.get("content-type") || "application/octet-stream", "content-disposition": "inline; filename*=UTF-8''" + encodeURIComponent(name), "cache-control": "no-store" } });
     }
     if (op === "send") {
-      const file = body.file && typeof body.file === "object" ? body.file : null;
-      if (!spaceOk(body.space) || (!String(body.text || "").trim() && !file)) return J({ error: "חסר טקסט או שיחה" }, 400);
+      const files = (Array.isArray(body.files) ? body.files : body.file ? [body.file] : []).filter((f) => f && typeof f === "object");
+      if (!spaceOk(body.space) || (!String(body.text || "").trim() && !files.length)) return J({ error: "חסר טקסט או שיחה" }, 400);
       if (body.thread && !threadOk(body.space, body.thread)) return J({ error: "שרשור לא תקין" }, 400);
+      if (files.length > MAX_FILES) return J({ error: "אפשר לצרף עד " + MAX_FILES + " קבצים" }, 400);
       const msg = { text: String(body.text || "").slice(0, 4000) };
-      if (file) {
-        // קובץ מצורף מגיע כ-base64 בתוך ה-JSON (כך הוא עובר גם דרך הגשר)
-        const data = String(file.data || "");
-        if (!data || !/^[A-Za-z0-9+/]+=*$/.test(data)) return J({ error: "קובץ לא תקין" }, 400);
-        if (data.length > MAX_UPLOAD * 4 / 3 + 8) return J({ error: "הקובץ גדול מדי (עד 8 מגה)" }, 413);
-        const fname = String(file.name || "file").replace(/[\\/"\r\n\0]/g, "").slice(0, 150) || "file";
-        const ftype = /^[\w.+-]+\/[\w.+-]+$/.test(String(file.type || "")) ? String(file.type) : "application/octet-stream";
-        msg.attachment = [{ attachmentDataRef: { attachmentUploadToken: await uploadAttachment(env, body.space, b64bytes(data), fname, ftype) } }];
+      if (files.length) {
+        // קבצים מצורפים מגיעים כ-base64 בתוך ה-JSON (כך הם עוברים גם דרך הגשר)
+        let total = 0;
+        for (const f of files) {
+          const data = String(f.data || "");
+          if (!data || !/^[A-Za-z0-9+/]+=*$/.test(data)) return J({ error: "קובץ לא תקין" }, 400);
+          total += data.length;
+        }
+        if (total > MAX_UPLOAD * 4 / 3 + 8 * files.length) return J({ error: "הקבצים גדולים מדי (עד 8 מגה יחד)" }, 413);
+        msg.attachment = [];
+        for (const f of files) {
+          const fname = String(f.name || "file").replace(/[\\/"\r\n\0]/g, "").slice(0, 150) || "file";
+          const ftype = /^[\w.+-]+\/[\w.+-]+(;\s*codecs=[\w.,-]+)?$/.test(String(f.type || "")) ? String(f.type).split(";")[0] : "application/octet-stream";
+          msg.attachment.push({ attachmentDataRef: { attachmentUploadToken: await uploadAttachment(env, body.space, b64bytes(String(f.data)), fname, ftype) } });
+        }
       }
       if (body.thread) msg.thread = { name: body.thread };
-      const r = await gapi(env, `${CHAT}${body.space}/messages` + (body.thread ? "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" : ""), { body: msg });
+      const target = `${CHAT}${body.space}/messages` + (body.thread ? "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" : "");
+      const q = body.quote && typeof body.quote === "object" ? body.quote : null;
+      if (q && !msgOk(body.space, q.id)) return J({ error: "ציטוט לא תקין" }, 400);
+      let r;
+      if (q && isoOk(q.upd)) {
+        // ציטוט אמיתי של גוגל; אם גוגל דוחה אותו – ההודעה נשלחת עם הציטוט כטקסט
+        try { r = await gapi(env, target, { body: { ...msg, quotedMessageMetadata: { name: q.id, lastUpdateTime: q.upd } } }); }
+        catch (e) { if (e.status !== 400 && e.status !== 403 && e.status !== 404) throw e; }
+      }
+      if (!r) {
+        if (q) msg.text = ("> " + cleanName(q.text || "הודעה") + "\n" + msg.text).slice(0, 4000);
+        r = await gapi(env, target, { body: msg });
+      }
       await markRead(env, body.space).catch(() => {});
       return J({ ok: true, id: r.name || "" });
     }
@@ -339,6 +400,75 @@ export async function chatSiteApi(req, env, url) {
       }
       return J({ space, title, dm: true });
     }
+    if (op === "members") {
+      const space = url.searchParams.get("space");
+      if (!spaceOk(space)) return J({ error: "שיחה לא תקינה" }, 400);
+      const me = await myUserId(env);
+      const list = (await namedMembers(env, space)).map((m) => ({ ...m, me: m.uid === "users/" + me }));
+      return J({ members: list.sort((a, b) => b.me - a.me || a.name.localeCompare(b.name, "he")) });
+    }
+    if (op === "reactors") {
+      // מי הגיב באיזה אמוג'י
+      const space = url.searchParams.get("space"), id = url.searchParams.get("id");
+      if (!spaceOk(space) || !msgOk(space, id)) return J({ error: "הודעה לא תקינה" }, 400);
+      const [j, names] = await Promise.all([gapi(env, `${CHAT}${id}/reactions?pageSize=200`), members(env, space)]);
+      const by = {};
+      for (const r of j.reactions || []) {
+        const e = r.emoji?.unicode || "🙂", u = r.user?.name || "";
+        (by[e] = by[e] || []).push(names[u] || r.user?.displayName || (await userName(env, u)));
+      }
+      return J({ reactors: Object.entries(by).map(([e, who]) => ({ e, who })) });
+    }
+    if (op === "group") {
+      // קבוצה חדשה עם שם וחברים
+      const name = cleanName(body.name);
+      const emails = [...new Set((Array.isArray(body.emails) ? body.emails : []).map((e) => String(e || "").trim().toLowerCase()))];
+      if (!name) return J({ error: "חסר שם לקבוצה" }, 400);
+      if (!emails.length || emails.length > 20 || !emails.every(emailOk)) return J({ error: "רשימת החברים לא תקינה" }, 400);
+      const sp = await gapi(env, `${CHAT}spaces:setup`, { body: { space: { spaceType: "SPACE", displayName: name }, memberships: emails.map((e) => ({ member: { name: "users/" + e, type: "HUMAN" } })) } });
+      if (!spaceOk(sp.name)) return J({ error: "לא הצלחתי לפתוח קבוצה" }, 502);
+      await logEvent(env, "נפתחה קבוצת צאט חדשה מהאתר: " + name);
+      return J({ space: sp.name, title: sp.displayName || name, dm: false });
+    }
+    if (op === "addmember") {
+      const email = String(body.email || "").trim().toLowerCase();
+      if (!spaceOk(body.space) || !emailOk(email)) return J({ error: "כתובת לא תקינה" }, 400);
+      await gapi(env, `${CHAT}${body.space}/members`, { body: { member: { name: "users/" + email, type: "HUMAN" } } });
+      await logEvent(env, "נוסף חבר לקבוצת צאט מהאתר: " + email);
+      return J({ ok: true });
+    }
+    if (op === "removemember" || op === "leave") {
+      if (!spaceOk(body.space)) return J({ error: "שיחה לא תקינה" }, 400);
+      let mid = String(body.mid || "");
+      if (op === "leave") {
+        const me = await myUserId(env);
+        mid = (await memberList(env, body.space)).find((m) => m.uid === "users/" + me)?.mid || "";
+        if (!mid) return J({ error: "לא מצאתי אותך ברשימת החברים" }, 404);
+      } else if (!mid.startsWith(body.space + "/members/") || !/^spaces\/[\w-]+\/members\/[\w.@-]+$/.test(mid)) return J({ error: "חבר לא תקין" }, 400);
+      await gapi(env, CHAT + mid, { method: "DELETE" });
+      await logEvent(env, op === "leave" ? "יציאה מקבוצת צאט מהאתר" : "הוסר חבר מקבוצת צאט מהאתר");
+      return J({ ok: true });
+    }
+    if (op === "rename") {
+      const name = cleanName(body.name);
+      if (!spaceOk(body.space) || !name) return J({ error: "חסר שם" }, 400);
+      const sp = await gapi(env, `${CHAT}${body.space}?updateMask=displayName`, { method: "PATCH", body: { displayName: name } });
+      return J({ ok: true, title: sp.displayName || name });
+    }
+    if (op === "unread") {
+      // סימון כלא נקרא: "קראתי עד" זז לרגע שלפני ההודעה שנבחרה
+      if (!spaceOk(body.space) || !isoOk(body.at)) return J({ error: "שיחה לא תקינה" }, 400);
+      const t = new Date(new Date(body.at).getTime() - 1000).toISOString();
+      await gapi(env, `${CHAT}users/me/${body.space}/spaceReadState?updateMask=lastReadTime`, { method: "PATCH", body: { lastReadTime: t } });
+      return J({ ok: true });
+    }
+    if (op === "pin") {
+      if (!spaceOk(body.space)) return J({ error: "שיחה לא תקינה" }, 400);
+      const pins = (await kvJson(env, "cs:pins", [])).filter((x) => x !== body.space);
+      if (body.on) pins.push(body.space);
+      await env.KV.put("cs:pins", JSON.stringify(pins.slice(-30)));
+      return J({ ok: true, pinned: !!body.on });
+    }
     if (op === "read") {
       if (!spaceOk(body.space)) return J({ error: "שיחה לא תקינה" }, 400);
       await markRead(env, body.space);
@@ -362,6 +492,7 @@ export async function chatSiteApi(req, env, url) {
     return J({ error: "unknown" }, 404);
   } catch (e) {
     if (e instanceof NotConnected) return J({ error: "החשבון של גוגל לא מחובר לקו" }, 503);
+    if (e.status === 403) return J({ error: "אין הרשאה לפעולה הזו בשיחה הזו" }, 403);
     await logEvent(env, "שגיאה באתר הצאט: " + String(e.message || e).slice(0, 150));
     return J({ error: "שגיאה בשרת" }, 500);
   }

@@ -5,7 +5,8 @@ const kv = new Map([["g:refresh", "rt"], ["g:me", "1"]]);
 const KV = { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, String(v)); }, delete: async (k) => { kv.delete(k); } };
 const env = { KV, PIN: "1234", BRIDGE_KEY: "bk", BUSINESS_EMAIL: "x@example-biz.com" };
 const sent = [], sentFull = [], calls = [], uploads = [], changed = [];
-let reacted = false;
+let reacted = false, rejectQuote = false;
+const readTimes = [];
 const json = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input instanceof Request ? input.url : input);
@@ -17,19 +18,22 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.includes("/reactions")) {
     if (method === "POST") { if (reacted) return new Response(JSON.stringify({ error: { message: "exists" } }), { status: 409 }); reacted = true; return json({ name: "spaces/A/messages/2/reactions/r1" }); }
     if (method === "DELETE") { reacted = false; return json({}); }
-    return json({ reactions: [{ name: "spaces/A/messages/2/reactions/r1" }] });
+    return json({ reactions: [{ name: "spaces/A/messages/2/reactions/r1", emoji: { unicode: "👍" }, user: { name: "users/2" } }] });
   }
+  if (/\/members\/[\w.@-]+$/.test(url) && method === "DELETE") { changed.push("unmember " + url.split("/v1/")[1]); return json({}); }
+  if (url.endsWith("/members") && method === "POST") { changed.push("member " + JSON.parse(init.body).member.name); return json({}); }
+  if (/\/v1\/spaces\/[\w-]+\?updateMask=displayName$/.test(url)) { changed.push("rename " + JSON.parse(init.body).displayName); return json({ displayName: JSON.parse(init.body).displayName }); }
   if (/\/messages\/[\w.-]+(\?|$)/.test(url)) {
     if (method === "GET") return json({ name: "x", sender: { name: url.includes("messages/1") ? "users/1" : "users/2" } });
     changed.push(method + " " + url.split("/v1/")[1] + (init.body ? " " + JSON.parse(init.body).text : "")); return json({});
   }
   if (url.includes("spaces:findDirectMessage")) return new Response("{}", { status: 404 });
-  if (url.includes("spaces:setup")) { changed.push("setup " + JSON.parse(init.body).memberships[0].member.name); return json({ name: "spaces/NEW" }); }
+  if (url.includes("spaces:setup")) { const b = JSON.parse(init.body); changed.push("setup " + (b.space.spaceType === "SPACE" ? b.space.displayName + ":" + b.memberships.length : b.memberships[0].member.name)); return json({ name: b.space.spaceType === "SPACE" ? "spaces/GRP" : "spaces/NEW", displayName: b.space.displayName }); }
   if (url.includes("people:search") || url.includes("otherContacts:search")) return url.includes("searchContacts") ? json({ results: [{ person: { names: [{ displayName: "דוד לוי" }], emailAddresses: [{ value: "David@Example-Biz.com" }] } }] }) : json({});
-  if (url.includes("/spaceReadState")) return init.method === "PATCH" ? json({}) : json({ lastReadTime: "2026-11-01T00:00:00Z" });
-  if (/\/messages(\?messageReplyOption=\w+)?$/.test(url) && init.method === "POST") { const b = JSON.parse(init.body); sent.push(b.text); sentFull.push(b); return json({ name: "spaces/A/messages/9" }); }
-  if (url.includes("/members")) return json({ memberships: [{ member: { name: "users/1", displayName: "אני" } }, { member: { name: "users/2", displayName: "משה כהן" } }] });
-  if (url.includes("/messages?")) return json({ messages: [{ name: "spaces/A/messages/2", sender: { name: "users/2" }, text: "שלום", createTime: "2026-11-08T10:00:00Z" }, { name: "spaces/A/messages/1", sender: { name: "users/1" }, text: "היי", createTime: "2026-11-08T09:00:00Z" }] });
+  if (url.includes("/spaceReadState")) { if (init.method === "PATCH") { readTimes.push(JSON.parse(init.body).lastReadTime); return json({}); } return json({ lastReadTime: "2026-11-01T00:00:00Z" }); }
+  if (/\/messages(\?messageReplyOption=\w+)?$/.test(url) && init.method === "POST") { const b = JSON.parse(init.body); if (b.quotedMessageMetadata && rejectQuote) return new Response(JSON.stringify({ error: { message: "bad quote" } }), { status: 400 }); sent.push(b.text); sentFull.push(b); return json({ name: "spaces/A/messages/9" }); }
+  if (url.includes("/members")) return json({ memberships: [{ name: "spaces/A/members/1", member: { name: "users/1", displayName: "אני" } }, { name: "spaces/A/members/2", role: "ROLE_MANAGER", member: { name: "users/2", displayName: "משה כהן" } }, { name: "spaces/A/members/b", member: { name: "users/b", type: "BOT", displayName: "בוט" } }] });
+  if (url.includes("/messages?")) return json({ messages: [{ name: "spaces/A/messages/2", sender: { name: "users/2" }, text: "שלום @אני", formattedText: "*שלום* <users/1>", annotations: [{ type: "USER_MENTION", userMention: { user: { name: "users/1" } } }], quotedMessageMetadata: { name: "spaces/A/messages/1" }, createTime: "2026-11-08T10:00:00Z" }, { name: "spaces/A/messages/1", sender: { name: "users/1" }, text: "היי", createTime: "2026-11-08T09:00:00Z" }] });
   if (url.includes("chat.googleapis.com/v1/spaces?")) return json({ spaces: [{ name: "spaces/A", spaceType: "DIRECT_MESSAGE", lastActiveTime: "2026-11-08T10:00:00Z" }, { name: "spaces/B", spaceType: "SPACE", displayName: "צוות", lastActiveTime: "2026-10-01T00:00:00Z" }] });
   throw new Error("unmocked " + url);
 };
@@ -74,6 +78,37 @@ assert(pp.j.people.length === 1 && pp.j.people[0].email === "david@example-biz.c
 const dm = await call("dm", { email: "david@example-biz.com", name: "דוד לוי" }, T);
 assert(dm.j.space === "spaces/NEW" && dm.j.title === "דוד לוי" && changed.includes("setup users/david@example-biz.com"), "פתיחת שיחה פרטית חדשה");
 assert((await call("dm", { email: "x/../y" }, T)).status === 400, "כתובת לא תקינה נדחית");
+const m2 = ms.j.messages[1];
+assert(m2.fmt === "*שלום* @אני" && m2.toMe === true && m2.quote.id === "spaces/A/messages/1" && m2.quote.text === "היי" && m2.quote.who === "אני" && ms.j.messages[0].toMe === false, "הודעה: עיצוב, אזכור שלי וציטוט");
+assert(sp.j.spaces[0].preview === "שלום @אני" && sp.j.spaces[0].previewWho === "" && sp.j.spaces[1].previewWho === "משה" && JSON.parse(kv.get("cs:prev:spaces/A")).t === "2026-11-08T10:00:00Z", "רשימת שיחות: תצוגה מקדימה של ההודעה האחרונה, שמורה ב-KV");
+const before = calls.length; await call("spaces", null, T);
+assert(!calls.slice(before).some((c) => c.includes("/messages?")), "תצוגה מקדימה לא נטענת שוב כשהשיחה לא השתנתה");
+const mb = await call("members", null, T, "?space=spaces/A");
+assert(mb.j.members.length === 2 && mb.j.members[0].me && mb.j.members[1].manager && mb.j.members[1].mid === "spaces/A/members/2", "רשימת חברים (בלי בוטים), אני ראשון");
+const rr = await call("reactors", null, T, "?space=spaces/A&id=spaces/A/messages/2");
+assert(rr.j.reactors[0].e === "👍" && rr.j.reactors[0].who[0] === "משה כהן", "מי הגיב באמוג'י");
+await call("send", { space: "spaces/A", text: "עונה", quote: { id: "spaces/A/messages/2", upd: "2026-11-08T10:00:00Z", text: "שלום" } }, T);
+assert(sentFull.pop().quotedMessageMetadata.name === "spaces/A/messages/2", "שליחה עם ציטוט");
+rejectQuote = true; await call("send", { space: "spaces/A", text: "עונה", quote: { id: "spaces/A/messages/2", upd: "2026-11-08T10:00:00Z", text: "שלום" } }, T); rejectQuote = false;
+assert(sent.pop() === "> שלום\nעונה", "ציטוט שגוגל דוחה נשלח כטקסט");
+assert((await call("send", { space: "spaces/A", text: "x", quote: { id: "spaces/B/messages/2" } }, T)).status === 400, "ציטוט משיחה אחרת נדחה");
+const f1 = { name: "a.txt", type: "text/plain", data: btoa("A") };
+await call("send", { space: "spaces/A", text: "", files: [f1, { ...f1, name: "b.webm", type: "audio/webm;codecs=opus" }] }, T);
+assert(sentFull.pop().attachment.length === 2 && uploads.pop().text.includes("Content-Type: audio/webm\r\n"), "שליחת כמה קבצים, כולל הקלטה קולית");
+assert((await call("send", { space: "spaces/A", files: Array(6).fill(f1) }, T)).status === 400, "יותר מדי קבצים נדחה");
+const gp = await call("group", { name: "צוות חדש", emails: ["a@example-biz.com", "B@example-biz.com", "a@example-biz.com"] }, T);
+assert(gp.j.space === "spaces/GRP" && gp.j.dm === false && changed.includes("setup צוות חדש:2"), "קבוצה חדשה עם חברים (בלי כפילויות)");
+assert((await call("group", { name: "", emails: ["a@example-biz.com"] }, T)).status === 400 && (await call("group", { name: "x", emails: ["bad"] }, T)).status === 400, "קבוצה בלי שם או עם כתובת שגויה נדחית");
+await call("addmember", { space: "spaces/A", email: "new@example-biz.com" }, T);
+await call("removemember", { space: "spaces/A", mid: "spaces/A/members/2" }, T);
+await call("leave", { space: "spaces/A" }, T);
+await call("rename", { space: "spaces/B", name: "שם חדש" }, T);
+assert(changed.includes("member users/new@example-biz.com") && changed.includes("unmember spaces/A/members/2") && changed.includes("unmember spaces/A/members/1") && changed.includes("rename שם חדש"), "הוספת חבר, הסרה, יציאה מקבוצה ושינוי שם");
+assert((await call("removemember", { space: "spaces/A", mid: "spaces/B/members/2" }, T)).status === 400, "הסרת חבר משיחה אחרת נדחית");
+await call("unread", { space: "spaces/A", at: "2026-11-08T10:00:00Z" }, T);
+assert(readTimes.pop() === "2026-11-08T09:59:59.000Z", "סימון כלא נקרא");
+await call("pin", { space: "spaces/B", on: true }, T);
+assert((await call("spaces", null, T)).j.spaces[1].pinned === true && JSON.parse(kv.get("cs:pins"))[0] === "spaces/B", "הצמדת שיחה");
 await call("mute", { space: "spaces/B", on: true }, T);
 assert(JSON.parse(kv.get("mute")).includes("spaces/B"), "השתקת קבוצה");
 assert((await call("logout", {}, T)).j.ok && (await call("spaces", null, T)).status === 401, "יציאה מבטלת את האסימון");
