@@ -1,2 +1,3 @@
 scratchpad/
 *.wav
+__pycache__/

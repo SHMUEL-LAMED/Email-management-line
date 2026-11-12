@@ -1,7 +1,7 @@
 // נקודת הכניסה שעולה ל-Cloudflare: כל הקו (worker.js) כמו שהוא, ובנוסף ה-API של אתר הצאט (chatsite.js)
 // והשיחה עם Claude מאתר הצאט (chat/claude.html): ההודעות נכנסות לתור של הקו (kind "site"),
 // והתשובות נשארות באתר – לא מוקראות בקו ולא נשלחות כעותק במייל.
-import worker, { CallState as BaseCallState } from "./worker.js";
+import worker, { CallState as BaseCallState, safeEq } from "./worker.js";
 import { chatSiteApi } from "./chatsite.js";
 export * from "./worker.js";
 
@@ -125,7 +125,9 @@ export default {
     const url = new URL(req.url);
     if (url.pathname === "/chatsite/claude_send" || url.pathname === "/chatsite/claude_history") return claudeSiteApi(req, env, url);
     if (url.pathname.startsWith("/chatsite/")) return chatSiteApi(req, env, url);
-    if (url.pathname === "/bridge/answer" && req.method === "POST" && env.CALLS) {
+    // בדיקת המפתח קודם: בלי BRIDGE_KEY תקין לא קוראים כלום מהתור
+    const bridgeKeyOk = async () => safeEq(url.searchParams.get("k") || req.headers.get("x-bridge-key") || "", env.BRIDGE_KEY);
+    if (url.pathname === "/bridge/answer" && req.method === "POST" && env.CALLS && (await bridgeKeyOk())) {
       // תשובה לשיחה מהאתר: בלי עותק במייל
       const raw = await req.text();
       let b = {};
