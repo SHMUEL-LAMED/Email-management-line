@@ -1,6 +1,7 @@
 // אתר הצאט (shmuel-lamed.github.io/chat) – ה-API שהאתר פונה אליו.
 // מודול נפרד מ-worker.js: משתמש באותו KV ובאותו חיבור לגוגל (g:refresh / g:access), בלי הרשאות חדשות.
 // כניסה עם הקוד הסודי של הקו; מקבלים אסימון לחודש (נשמר ב-KV רק כ-hash).
+import { checkPin, hasPin } from "./worker.js";
 const CHAT = "https://chat.googleapis.com/v1/";
 const PEOPLE = "https://people.googleapis.com/v1/";
 const ORIGINS = ["https://shmuel-lamed.github.io"];
@@ -205,9 +206,8 @@ export async function chatSiteApi(req, env, url) {
       // אותו מונה ניסיונות שגויים כמו בקו: 6 טעויות נועלות לשעה
       const fails = +(await env.KV.get("pinfails")) || 0;
       if (fails >= 6) return J({ error: "הכניסה חסומה לשעה בגלל ניסיונות שגויים" }, 429);
-      const pinHash = (await env.KV.get("pin_hash")) || (await sha(env.PIN || ""));
-      if (!env.PIN && !(await env.KV.get("pin_hash"))) return J({ error: "לא הוגדר קוד סודי" }, 503);
-      if (!body.pin || (await sha(String(body.pin))) !== pinHash) {
+      if (!(await hasPin(env))) return J({ error: "לא הוגדר קוד סודי" }, 503);
+      if (!(await checkPin(env, body.pin))) {
         await env.KV.put("pinfails", String(fails + 1), { expirationTtl: 3600 });
         await logEvent(env, fails + 1 >= 6 ? "הקו והאתר ננעלו לשעה אחרי 6 קודים שגויים" : "קוד שגוי בכניסה לאתר הצאט");
         return J({ error: "קוד שגוי" }, 401);
@@ -308,7 +308,10 @@ export async function chatSiteApi(req, env, url) {
       const tok2 = await accessToken(env);
       const r = await fetch(`${CHAT}media/${ref}?alt=media`, { headers: { Authorization: "Bearer " + tok2 } });
       if (!r.ok) return J({ error: "לא הצלחתי להוריד את הקובץ" }, 502);
-      return new Response(r.body, { headers: { ...cors, "content-type": r.headers.get("content-type") || "application/octet-stream", "content-disposition": "inline; filename*=UTF-8''" + encodeURIComponent(name), "cache-control": "no-store" } });
+      // תמונות, שמע, וידאו ו-PDF נפתחים בדפדפן; כל סוג אחר (למשל HTML) יורד כקובץ, כדי שלא ירוץ כדף על כתובת השרת
+      const ctype = r.headers.get("content-type") || "application/octet-stream";
+      const inline = /^(image\/(png|jpe?g|gif|webp|heic|heif|bmp)|audio\/|video\/|application\/pdf)/i.test(ctype);
+      return new Response(r.body, { headers: { ...cors, "content-type": ctype, "x-content-type-options": "nosniff", "content-disposition": (inline ? "inline" : "attachment") + "; filename*=UTF-8''" + encodeURIComponent(name), "cache-control": "no-store" } });
     }
     if (op === "send") {
       const files = (Array.isArray(body.files) ? body.files : body.file ? [body.file] : []).filter((f) => f && typeof f === "object");

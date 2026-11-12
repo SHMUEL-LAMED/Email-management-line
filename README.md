@@ -11,12 +11,14 @@
 - `chatsite.js` – ה-API של אתר הצאט (`/chatsite/<פעולה>`), מחובר דרך `entry.js`. האתר עצמו במאגר `shmuel-lamed.github.io` (תיקיית `chat`), ופונה לכאן דרך גשר ב-Supabase (`chat-netfree`) כי נטפרי חוסם workers.dev. הגשר מעביר רשימה סגורה של פעולות, ולכן פעולה חדשה כאן צריך להוסיף גם שם.
   פעולות: login, logout, spaces (עם תצוגה מקדימה והצמדות), messages (עם `before` להודעות ישנות), thread, file, send (ציטוט, אזכורים, עד 5 קבצים ו-8 מגה יחד), react, reactors, edit, delete, people, dm, group, members, addmember, removemember, leave, rename, read, unread, pin, mute, summary.
 - `music/` – מנגינת ההמתנה (נוצרה בקוד, מקורית). הקבצים בקו: `/Hold/wait1..3`.
-- `test/` – סימולציות של שיחות עם גוגל, ימות ו-Gemini מדומים (`node test/sim.mjs`, `sim-ai.mjs`, `sim-claude.mjs`, `sim-media.mjs`, `sim-media-files.mjs`, `sim-new.mjs`, ו-`sim-do.mjs` עם Durable Object מדומה: משימות רקע ב-alarm, נעילה מפני בקשה כפולה מימות, וכוכבית לשמיעה חוזרת).
+- `test/` – סימולציות של שיחות עם גוגל, ימות ו-Gemini מדומים (`node test/sim.mjs`, `sim-ai.mjs`, `sim-claude.mjs`, `sim-media.mjs`, `sim-media-files.mjs`, `sim-new.mjs`, `sim-security.mjs` (מפתחות, קוד סודי, הורדת קבצים ובדיקת תקינות), ו-`sim-do.mjs` עם Durable Object מדומה: משימות רקע ב-alarm, נעילה מפני בקשה כפולה מימות, וכוכבית לשמיעה חוזרת).
 - `deploy_code.py` – העלאת קוד בלבד ל-Cloudflare, בלי לגעת בסודות ובהגדרות (keep_bindings), כולל ה-cron.
-- `deploy.py` – העלאה מלאה עם כל ההגדרות (קורא סודות מתיקייה מקומית, לא מהמאגר).
+- `deploy.py` – העלאה מלאה עם כל ההגדרות (קורא סודות מתיקייה מקומית, לא מהמאגר): `python3 deploy.py <תיקייה>`. מעלה את כל המודולים ושומר את גשר הווידאו, כמו `deploy_code.py`.
 
 ## סודות (לא במאגר!)
-נשמרים רק ב-Cloudflare כ-Secrets: YM_TOKEN, PIN, PATH_KEY, SETUP_KEY, BRIDGE_KEY, GOOGLE_CLIENT_SECRET, GEMINI_KEY.
+נשמרים רק ב-Cloudflare כ-Secrets: YM_TOKEN, PIN, PATH_KEY, SETUP_KEY, BRIDGE_KEY, GOOGLE_CLIENT_SECRET, GEMINI_KEY. אפשרי: PIN_SECRET.
+הקוד הסודי שהוחלף בטלפון נשמר ב-KV (`pin_hash`) כחתימת HMAC עם PIN_SECRET (ואם אין – SETUP_KEY). החלפת המפתח הזה מבטלת את הקוד השמור: מוחקים את `pin_hash` ב-KV, והקוד חוזר להיות ה-PIN.
+כל המפתחות (PATH_KEY, SETUP_KEY, BRIDGE_KEY) והקוד נבדקים בהשוואה בזמן קבוע.
 משתני טקסט: ALLOWED_PHONES, BUSINESS_EMAIL, GOOGLE_CLIENT_ID. אפשרי: TTS_VOICE (ברירת מחדל Orus), TTS_MODELS, GEMINI_MODELS, AGENT_MODELS, VOICE_BUDGET_MS (תקציב הזמן לקול הטבעי בכל תשובה, ברירת מחדל 8000; מה שלא מוכן בזמן מוקרא בקול של ימות), YT_KEY (מפתח API של יוטיוב; בלעדיו חיפוש ביוטיוב דורש את ההרשאה youtube.readonly, כלומר חיבור מחדש של החשבון בדף /connect).
 החיבור לגוגל (refresh token) שמור ב-KV `yemot-mail-kv` במפתח `g:refresh`.
 
@@ -31,6 +33,7 @@
 - **הגדרות (9):** קוד סודי וניתוק חירום, מצב הקול, VIP, תשובות מוכנות, ביטול השתקה, דוח שימוש ב-AI, מצב האתרים, בוט מ.כ (דרך השיחה הפרטית שלו בצ'אט), בקשת שינוי באתר דרך Claude.
 - **המשך מאיפה שעצרת:** אם השיחה נותקה באמצע קריאת מיילים, בכניסה הבאה מוצע להמשיך.
 - **התראות אבטחה:** מייל על מספר לא מורשה או קוד שגוי.
+- **בדיקת תקינות יומית:** כל בוקר ב-08:00 (לא בשבת) נבדקים החיבור לגוגל, המפתח של ימות והמפתח של Gemini. תקלה נרשמת ביומן, נשלחת במייל, ומוקראת בכניסה לקו עד שהיא נפתרת.
 
 ## שמיעת סרטונים והקלטות
 סרטון או הקלטה שנשלחו בצאט (מקש 5 בשיחה), שמצורפים למייל (קבצים מצורפים, מקש 1) או ששותפו איתך בדרייב (קבצים, מקש 3) מומרים לשמע ומושמעים בטלפון. מסרטון נשמע רק הקול.

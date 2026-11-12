@@ -72,6 +72,45 @@ async function sha(s) {
   const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(s)));
   return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+// השוואה בזמן קבוע (מפתחות וקודים): משווים את ה-hash של שני הצדדים, כך שזמן התשובה לא מגלה כמה תווים נכונים
+async function safeEq(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || !b) return false;
+  const enc = new TextEncoder();
+  const [x, y] = await Promise.all([crypto.subtle.digest("SHA-256", enc.encode(a)), crypto.subtle.digest("SHA-256", enc.encode(b))]);
+  const u = new Uint8Array(x), v = new Uint8Array(y);
+  let d = 0;
+  for (let i = 0; i < u.length; i++) d |= u[i] ^ v[i];
+  return d === 0;
+}
+// הקוד הסודי נשמר ב-KV כחתימת HMAC עם מפתח סודי (PIN_SECRET, ואם אין – SETUP_KEY), עם הקידומת "v2:".
+// hash ישן (SHA-256 בלי מפתח) עדיין מתקבל, ומומר לחתימה בכניסה המוצלחת הראשונה.
+// הערה: החלפת SETUP_KEY (כשאין PIN_SECRET) מבטלת את הקוד השמור; במקרה כזה מוחקים את pin_hash ב-KV וחוזרים ל-PIN.
+const pinSecret = (env) => env.PIN_SECRET || env.SETUP_KEY || "";
+async function hmacHex(key, msg) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const s = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(String(msg)));
+  return [...new Uint8Array(s)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function pinRecord(env, pin) {
+  const key = pinSecret(env);
+  return key ? "v2:" + (await hmacHex(key, pin)) : await sha(pin);
+}
+async function hasPin(env) {
+  return !!(env.PIN || (await env.KV.get("pin_hash")));
+}
+async function checkPin(env, pin) {
+  if (!pin) return false;
+  pin = String(pin);
+  const stored = await env.KV.get("pin_hash");
+  if (stored && stored.startsWith("v2:")) return safeEq("v2:" + (await hmacHex(pinSecret(env), pin)), stored);
+  if (stored) {
+    const ok = await safeEq(await sha(pin), stored);
+    if (ok && pinSecret(env)) await env.KV.put("pin_hash", await pinRecord(env, pin));
+    return ok;
+  }
+  // אין קוד שמור ב-KV: הקוד הוא ה-Secret בשם PIN (שמור רק ב-Cloudflare)
+  return !!env.PIN && safeEq(pin, String(env.PIN));
+}
 const randKey = (n = 24) => {
   const a = new Uint8Array(n);
   crypto.getRandomValues(a);
@@ -862,13 +901,10 @@ H.start = async (st, input, ctx) => {
   return R.digits(st, "שלום. הקש את הקוד הסודי ובסיום סולמית", 4, 8);
 };
 
-async function currentPinHash(env) {
-  return (await env.KV.get("pin_hash")) || (await sha(env.PIN || ""));
-}
 
 H.pin = async (st, input, ctx) => {
   const env = ctx.env;
-  if (input && input !== "none" && (await sha(input)) === (await currentPinHash(env))) {
+  if (input && input !== "none" && (await checkPin(env, input))) {
     await env.KV.delete("pinfails").catch(() => {});
     st.authed = true;
     return go(st, "welcome", undefined, ctx);
@@ -912,6 +948,9 @@ H.welcome = async (st, input, ctx) => {
     if (e instanceof NotConnected) return R.msg("חשבון הגוגל עדיין לא מחובר לקו. צריך להיכנס לדף החיבור ולחבר אותו. להתראות") + R.hangup();
     throw e;
   }
+  // תקלה שנמצאה בבדיקת התקינות היומית מוקראת בתחילת כל שיחה, עד שהבדיקה הבאה עוברת
+  const bad = await kvJson(env, "health:bad");
+  if (bad?.items?.length) intro = "שים לב: בבדיקת התקינות היומית נמצאה תקלה ב" + bad.items.join(", וב") + ". " + intro;
   const r = await kvJson(env, "resume");
   if (r && Date.now() - r.t < 3 * 3600e3 && (r.kind !== "mail" || r.ids?.length)) { st.resume = r; return R.note(intro) + (await go(st, "resumeAsk", undefined, ctx)); }
   return R.note(intro) + (await go(st, "main", undefined, ctx));
@@ -1848,7 +1887,7 @@ H.pinNew2 = async (st, input, ctx) => {
   const p = st.newPin;
   delete st.newPin;
   if (input !== p) return go(st, "main", undefined, ctx, "הקודים לא תואמים. הקוד לא הוחלף.");
-  await ctx.env.KV.put("pin_hash", await sha(p));
+  await ctx.env.KV.put("pin_hash", await pinRecord(ctx.env, p));
   await logEvent(ctx.env, "הקוד הסודי הוחלף דרך הטלפון");
   return go(st, "main", undefined, ctx, "הקוד הוחלף בהצלחה.");
 };
@@ -3552,7 +3591,7 @@ H.securityMenu = async (st, input, ctx) => {
   return go(st, "settingsMenu", undefined, ctx);
 };
 H.emergencyPin = async (st, input, ctx) => {
-  if (!input || input === "none" || (await sha(input)) !== (await currentPinHash(ctx.env))) return go(st, "settingsMenu", undefined, ctx, "הקוד שגוי. לא נותק.");
+  if (!input || input === "none" || !(await checkPin(ctx.env, input))) return go(st, "settingsMenu", undefined, ctx, "הקוד שגוי. לא נותק.");
   st.step = "emergencyConfirm";
   return R.menu(st, "לאישור סופי של הניתוק הקש 1. לביטול הקש 0.", "0.1");
 };
@@ -3984,6 +4023,47 @@ async function scheduledTick(env) {
     await env.KV.put("daily:" + day, "1", { expirationTtl: 2 * 86400 });
     await dailySummaryEmail(env).catch((e) => logEvent(env, "סיכום יומי נכשל: " + e.message));
   }
+  // בדיקת תקינות פעם ביום, בבוקר (לא בשבת)
+  if (hm >= "08:00" && hm < "08:20" && !isShabbatIL() && !(await env.KV.get("health:" + day))) {
+    await env.KV.put("health:" + day, "1", { expirationTtl: 2 * 86400 });
+    await healthCheck(env).catch((e) => logEvent(env, "בדיקת התקינות נכשלה: " + e.message));
+  }
+}
+
+// בדיקת תקינות: החיבור לגוגל, המפתח של ימות, והמפתח של Gemini.
+// אם משהו לא עובד: נרשם ביומן, נשלח מייל (אם המייל עצמו עובד), ומוקרא בכניסה לקו עד שהבעיה נפתרת.
+async function healthCheck(env) {
+  const checks = {
+    "החיבור לגוגל": async () => { await gapi(env, `${G.gmail}profile`); },
+    "המפתח של ימות": async () => {
+      const j = await ym(env, "GetSession");
+      if (j?.responseStatus !== "OK") throw new Error(j?.message || j?.responseStatus || "אין תשובה");
+    },
+    "המפתח של Gemini": async () => {
+      if (!env.GEMINI_KEY) throw new Error("לא הוגדר");
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=${env.GEMINI_KEY}`, { signal: AbortSignal.timeout(15000) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+    },
+  };
+  const failed = [];
+  for (const [name, fn] of Object.entries(checks)) {
+    try { await fn(); } catch (e) { failed.push({ name, err: e instanceof NotConnected ? "לא מחובר" : String(e.message || e).slice(0, 200) }); }
+  }
+  if (!failed.length) {
+    if (await env.KV.get("health:bad")) await logEvent(env, "בדיקת התקינות עברה – התקלה נפתרה");
+    await env.KV.delete("health:bad");
+    return failed;
+  }
+  await env.KV.put("health:bad", JSON.stringify({ at: Date.now(), items: failed.map((f) => f.name) }), { expirationTtl: 3 * 86400 });
+  await logEvent(env, "בדיקת התקינות מצאה תקלה: " + failed.map((f) => f.name + " (" + f.err + ")").join(", "));
+  if (!failed.some((f) => f.name === "החיבור לגוגל") && env.BUSINESS_EMAIL) {
+    await gmailSend(env, {
+      to: env.BUSINESS_EMAIL,
+      subject: "תקלה בקו המייל",
+      body: "בבדיקת התקינות היומית נמצאו תקלות:\n" + failed.map((f) => "- " + f.name + ": " + f.err).join("\n") + "\n\nזמן: " + nowIL() + "\nאפשר לראות פרטים ביומן בדף הניהול.",
+    }).catch((e) => logEvent(env, "שליחת התראת תקינות נכשלה: " + e.message));
+  }
+  return failed;
 }
 
 // שלבים שבהם "none" הוא פול רגיל של המתנה למשימת רקע (מנגינת המתנה), ולא שתיקה של המתקשר
@@ -4087,7 +4167,7 @@ a.btn{display:inline-block;background:var(--acc);color:#fff;text-decoration:none
 ul{padding-inline-start:18px;margin:0}li{margin:4px 0;font-size:14px}</style></head><body><main>${body}</main></body></html>`;
 
 async function statusPage(env, url) {
-  if (url.searchParams.get("k") !== env.SETUP_KEY) return html(PAGE("לא מורשה", `<div class="card"><h1>אין גישה</h1></div>`), 403);
+  if (!(await safeEq(url.searchParams.get("k") || "", env.SETUP_KEY))) return html(PAGE("לא מורשה", `<div class="card"><h1>אין גישה</h1></div>`), 403);
   const email = await env.KV.get("g:email");
   const log = await kvJson(env, "log", []);
   const k = encodeURIComponent(env.SETUP_KEY);
@@ -4117,7 +4197,7 @@ async function testConnection(env) {
 }
 
 async function connect(env, url) {
-  if (url.searchParams.get("k") !== env.SETUP_KEY) return html(PAGE("לא מורשה", `<div class="card"><h1>אין גישה</h1></div>`), 403);
+  if (!(await safeEq(url.searchParams.get("k") || "", env.SETUP_KEY))) return html(PAGE("לא מורשה", `<div class="card"><h1>אין גישה</h1></div>`), 403);
   const state = randKey(20);
   await env.KV.put("oauth_state:" + state, "1", { expirationTtl: 900 });
   const domain = String(env.BUSINESS_EMAIL || "").split("@")[1] || "";
@@ -4187,7 +4267,7 @@ function isShabbatIL(d = new Date()) {
 }
 async function bridgeApi(req, env, url) {
   const key = url.searchParams.get("k") || req.headers.get("x-bridge-key");
-  if (!env.BRIDGE_KEY || key !== env.BRIDGE_KEY) return new Response("forbidden", { status: 403 });
+  if (!(await safeEq(key || "", env.BRIDGE_KEY))) return new Response("forbidden", { status: 403 });
   const op = url.pathname.split("/")[2];
   const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
   const J = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json; charset=utf-8" } });
@@ -4230,7 +4310,7 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const path = url.pathname;
-    if (env.PATH_KEY && path === "/yemot/" + env.PATH_KEY) return handleYemot(req, env, ctx);
+    if (env.PATH_KEY && path.startsWith("/yemot/") && (await safeEq(path.slice(7), env.PATH_KEY))) return handleYemot(req, env, ctx);
     if (path.startsWith("/bridge/")) return bridgeApi(req, env, url);
     if (path === "/connect") return connect(env, url);
     if (path === "/oauth/callback") return oauthCallback(env, url);
@@ -4241,4 +4321,4 @@ export default {
 };
 
 // לבדיקות
-export { claudeMailHtml, isShabbatIL, sunsetIL, saveMailToDrive, H, say, bodyOf, parseAddr, handleYemot, findPeople, toHebrew, transcribe, geminiTools, aiSystem, runMediaJob, scheduledTick, claudeMails, renderSpeech, chunkText };
+export { healthCheck, safeEq, checkPin, hasPin, pinRecord, claudeMailHtml, isShabbatIL, sunsetIL, saveMailToDrive, H, say, bodyOf, parseAddr, handleYemot, findPeople, toHebrew, transcribe, geminiTools, aiSystem, runMediaJob, scheduledTick, claudeMails, renderSpeech, chunkText };
