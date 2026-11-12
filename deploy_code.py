@@ -5,8 +5,9 @@ import email, json, os, sys, uuid, urllib.request
 ACC = "7c5ecc8cc6dc99838cfbf1b3a1086b74"
 NAME = "yemot-mail"
 HERE = os.path.dirname(os.path.abspath(__file__))
-# המודולים שעולים: entry.js (נקודת הכניסה) מחבר את worker.js (הקו) ואת chatsite.js (אתר הצאט)
-MODULES = ["entry.js", "worker.js", "chatsite.js"]
+# המודולים שעולים: entry.js (נקודת הכניסה) מחבר את worker.js (הקו) ואת chatsite.js (אתר הצאט).
+# worker.js מחבר את כל הקוד שבתיקייה lib/ (עולה עם הנתיב שלו, למשל lib/base.js).
+MODULES = ["entry.js", "worker.js", "chatsite.js"] + sorted("lib/" + f for f in os.listdir(os.path.join(HERE, "lib")) if f.endswith(".js"))
 MAIN = "entry.js"
 COMPAT = "2025-09-01"
 KEEP = ["secret_text", "plain_text", "kv_namespace", "ai", "durable_object_namespace"]

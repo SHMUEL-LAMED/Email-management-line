@@ -19,7 +19,7 @@ jobs:
           node-version: 24
       - name: Check syntax and run simulations
         run: |
-          for js_file in *.js; do
+          for js_file in *.js lib/*.js; do
             node --input-type=module --check < "$js_file" || exit 1
           done
           python3 -m py_compile deploy_code.py deploy.py music/make_hold_music.py

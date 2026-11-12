@@ -3,7 +3,10 @@
 קו טלפוני לניהול המייל העסקי, Google Chat, היומן, הדרייב ועוד – דרך הטלפון, כולל עוזר AI, קול טבעי ושיחה עם Claude.
 
 ## מבנה
-- `worker.js` – כל הקוד: Cloudflare Worker בשם `yemot-mail` (שלוחת API בימות).
+- `worker.js` – מחבר את הקו: Cloudflare Worker בשם `yemot-mail` (שלוחת API בימות). הקוד עצמו בתיקייה `lib/`:
+  `base` (כלי עזר, דיבור, קוד סודי), `google` (ימות, AI, Gmail, אנשים, צ'אט), `state` (מצב השיחה ו-Durable Object), `menus` (מייל וצ'אט), `assistant` (העוזר החכם),
+  `media` (סרטונים והקלטות), `claude` (שיחה עם Claude), `voice` (קול טבעי והמשך מאיפה שעצרת), `files` (קבצים), `settings` (הגדרות וניווט), `web` (דפי ניהול וגשר), `flow` (הניתוב של ימות והמשימה המתוזמנת).
+  worker.js מייבא את כל השמות, כדי שגשר הווידאו שמוזרק לסופו בשרת החי ימשיך לעבוד.
   - `/yemot/<PATH_KEY>` – השלוחה שימות קוראת לה.
   - `/bridge/*` – API לריצות המתוזמנות של Claude (מוגן ב-`BRIDGE_KEY`): peek, take, wait, answer, live, emails, email_reply.
   - `/?k=<SETUP_KEY>` – דף ניהול (חסום בנטפרי).
