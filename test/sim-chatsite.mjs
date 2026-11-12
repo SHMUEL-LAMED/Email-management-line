@@ -47,6 +47,13 @@ const assert = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1);
 
 assert((await call("spaces")).status === 401, "בלי כניסה – חסום");
 assert((await call("login", { pin: "0000" })).status === 401, "קוד שגוי נדחה");
+assert(kv.get("cs:pinfails") === "1" && !kv.has("pinfails"), "קוד שגוי באתר נספר במונה של האתר ולא במונה של הקו");
+for (let i = 0; i < 5; i++) await call("login", { pin: "0000" });
+assert((await call("login", { pin: "1234" })).status === 429, "אחרי 6 קודים שגויים האתר ננעל");
+assert(!kv.has("pinfails"), "נעילת האתר לא נועלת את הקו");
+kv.set("pinfails", "6"); kv.delete("cs:pinfails");
+assert((await call("login", { pin: "1234" })).status === 200, "נעילת הקו לא נועלת את האתר");
+kv.delete("pinfails");
 const lg = await call("login", { pin: "1234" });
 assert(lg.status === 200 && lg.j.token && lg.cors === ORIGIN, "כניסה עם הקוד הנכון");
 const T = lg.j.token;
