@@ -22,6 +22,7 @@
 נשמרים רק ב-Cloudflare כ-Secrets: YM_TOKEN, PIN, PATH_KEY, SETUP_KEY, BRIDGE_KEY, GOOGLE_CLIENT_SECRET, GEMINI_KEY. אפשרי: PIN_SECRET.
 הקוד הסודי שהוחלף בטלפון נשמר ב-KV (`pin_hash`) כחתימת HMAC עם PIN_SECRET (ואם אין – SETUP_KEY). החלפת המפתח הזה מבטלת את הקוד השמור: מוחקים את `pin_hash` ב-KV, והקוד חוזר להיות ה-PIN.
 כל המפתחות (PATH_KEY, SETUP_KEY, BRIDGE_KEY) והקוד נבדקים בהשוואה בזמן קבוע.
+קודים שגויים נספרים בנפרד בקו (`pinfails`) ובאתר הצאט (`cs:pinfails`): 6 טעויות נועלות לשעה רק את המקום שבו הוקשו, כך שניחושים באתר לא נועלים את הכניסה בטלפון.
 משתני טקסט: ALLOWED_PHONES, BUSINESS_EMAIL, GOOGLE_CLIENT_ID. אפשרי: TTS_VOICE (ברירת מחדל Orus), TTS_MODELS, GEMINI_MODELS, AGENT_MODELS, VOICE_BUDGET_MS (תקציב הזמן לקול הטבעי בכל תשובה, ברירת מחדל 8000; מה שלא מוכן בזמן מוקרא בקול של ימות), YT_KEY (מפתח API של יוטיוב; בלעדיו חיפוש ביוטיוב דורש את ההרשאה youtube.readonly, כלומר חיבור מחדש של החשבון בדף /connect).
 החיבור לגוגל (refresh token) שמור ב-KV `yemot-mail-kv` במפתח `g:refresh`.
 

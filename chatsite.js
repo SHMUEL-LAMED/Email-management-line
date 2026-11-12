@@ -203,16 +203,17 @@ export async function chatSiteApi(req, env, url) {
   const spaceOk = (s) => /^spaces\/[\w-]+$/.test(String(s || ""));
   try {
     if (op === "login") {
-      // אותו מונה ניסיונות שגויים כמו בקו: 6 טעויות נועלות לשעה
-      const fails = +(await env.KV.get("pinfails")) || 0;
+      // מונה ניסיונות שגויים נפרד מזה של הקו: 6 טעויות נועלות לשעה את האתר בלבד,
+      // כדי שמי שמנחש קודים באתר (שפתוח לכולם) לא ינעל את הכניסה בטלפון
+      const fails = +(await env.KV.get("cs:pinfails")) || 0;
       if (fails >= 6) return J({ error: "הכניסה חסומה לשעה בגלל ניסיונות שגויים" }, 429);
       if (!(await hasPin(env))) return J({ error: "לא הוגדר קוד סודי" }, 503);
       if (!(await checkPin(env, body.pin))) {
-        await env.KV.put("pinfails", String(fails + 1), { expirationTtl: 3600 });
-        await logEvent(env, fails + 1 >= 6 ? "הקו והאתר ננעלו לשעה אחרי 6 קודים שגויים" : "קוד שגוי בכניסה לאתר הצאט");
+        await env.KV.put("cs:pinfails", String(fails + 1), { expirationTtl: 3600 });
+        await logEvent(env, fails + 1 >= 6 ? "אתר הצאט ננעל לשעה אחרי 6 קודים שגויים" : "קוד שגוי בכניסה לאתר הצאט");
         return J({ error: "קוד שגוי" }, 401);
       }
-      await env.KV.delete("pinfails").catch(() => {});
+      await env.KV.delete("cs:pinfails").catch(() => {});
       const tok = randKey(32);
       await env.KV.put("cs:tok:" + (await sha(tok)), "1", { expirationTtl: 30 * 86400 });
       await logEvent(env, "כניסה לאתר הצאט");
