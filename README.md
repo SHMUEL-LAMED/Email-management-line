@@ -11,7 +11,7 @@
   - `/bridge/*` – API לריצות המתוזמנות של Claude (מוגן ב-`BRIDGE_KEY`): peek, take, wait, answer, live, emails, email_reply.
   - `/?k=<SETUP_KEY>` – דף ניהול (חסום בנטפרי).
   - `scheduled` – משימה של Cloudflare כל 15 דקות: החזרת מיילים שנדחו, וסיכום יומי במייל ב-20:00.
-- `chatsite.js` – ה-API של אתר הצאט (`/chatsite/<פעולה>`), מחובר דרך `entry.js`. האתר עצמו במאגר `shmuel-lamed.github.io` (תיקיית `chat`), ופונה לכאן דרך גשר ב-Supabase (`chat-netfree`) כי נטפרי חוסם workers.dev. הגשר מעביר רשימה סגורה של פעולות, ולכן פעולה חדשה כאן צריך להוסיף גם שם.
+- `chatsite.js` – ה-API של אתר הצאט (`/chatsite/<פעולה>`), מחובר דרך `entry.js`. האתר עצמו והקוד של הגשר ב-Supabase (`chat-netfree`) במאגר [`chat`](https://github.com/SHMUEL-LAMED/chat), והוא פונה לכאן דרך הגשר כי נטפרי חוסם workers.dev. הגשר מעביר רשימה סגורה של פעולות (`OPS`), ולכן פעולה חדשה כאן צריך להוסיף גם שם.
   פעולות: login, logout, spaces (עם תצוגה מקדימה והצמדות), messages (עם `before` להודעות ישנות), thread, file, send (ציטוט, אזכורים, עד 5 קבצים ו-8 מגה יחד), react, reactors, edit, delete, people, dm, group, members, addmember, removemember, leave, rename, read, unread, pin, mute, summary.
 - `music/` – מנגינת ההמתנה (נוצרה בקוד, מקורית). הקבצים בקו: `/Hold/wait1..3`.
 - `test/` – סימולציות של שיחות עם גוגל, ימות ו-Gemini מדומים (`node test/sim.mjs`, `sim-ai.mjs`, `sim-claude.mjs`, `sim-media.mjs`, `sim-media-files.mjs`, `sim-new.mjs`, `sim-security.mjs` (מפתחות, קוד סודי, הורדת קבצים ובדיקת תקינות), ו-`sim-do.mjs` עם Durable Object מדומה: משימות רקע ב-alarm, נעילה מפני בקשה כפולה מימות, וכוכבית לשמיעה חוזרת).
