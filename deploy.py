@@ -17,6 +17,8 @@ bindings = [
     {"type": "ai", "name": "AI"},
     {"type": "durable_object_namespace", "name": "CALLS", "class_name": "CallState"},
 ]
+# Preserve the installed private GPT mailbox on full deployments as well.
+bindings.append({"type": "d1", "name": "GPT_DB", "id": "ab8fcb5c-bdd5-43f6-a3d1-589b5dbd414e"})
 # משתני טקסט (לא סודיים)
 for k in ("ALLOWED_PHONES", "BUSINESS_EMAIL", "GOOGLE_CLIENT_ID", "TTS_VOICE", "TTS_MODELS", "GEMINI_MODELS", "AGENT_MODELS", "VOICE_BUDGET_MS"):
     if sec.get(k):

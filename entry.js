@@ -1,3 +1,4 @@
+import { gptMailboxApi } from "./gpt-mailbox.js";
 // נקודת הכניסה שעולה ל-Cloudflare: כל הקו (worker.js) כמו שהוא, ובנוסף ה-API של אתר הצאט (chatsite.js)
 // והשיחה עם Claude מאתר הצאט (chat/claude.html): ההודעות נכנסות לתור של הקו (kind "site"),
 // והתשובות נשארות באתר – לא מוקראות בקו ולא נשלחות כעותק במייל.
@@ -124,6 +125,7 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (url.pathname === "/chatsite/claude_send" || url.pathname === "/chatsite/claude_history") return claudeSiteApi(req, env, url);
+    if (url.pathname === "/chatsite/gpt_send" || url.pathname === "/chatsite/gpt_history") return gptMailboxApi(req, env, url);
     if (url.pathname.startsWith("/chatsite/")) return chatSiteApi(req, env, url);
     // בדיקת המפתח קודם: בלי BRIDGE_KEY תקין לא קוראים כלום מהתור
     const bridgeKeyOk = async () => safeEq(url.searchParams.get("k") || req.headers.get("x-bridge-key") || "", env.BRIDGE_KEY);

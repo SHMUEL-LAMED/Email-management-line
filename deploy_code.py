@@ -7,10 +7,10 @@ NAME = "yemot-mail"
 HERE = os.path.dirname(os.path.abspath(__file__))
 # המודולים שעולים: entry.js (נקודת הכניסה) מחבר את worker.js (הקו) ואת chatsite.js (אתר הצאט).
 # worker.js מחבר את כל הקוד שבתיקייה lib/ (עולה עם הנתיב שלו, למשל lib/base.js).
-MODULES = ["entry.js", "worker.js", "chatsite.js"] + sorted("lib/" + f for f in os.listdir(os.path.join(HERE, "lib")) if f.endswith(".js"))
+MODULES = ["entry.js", "worker.js", "chatsite.js", "gpt-mailbox.js"] + sorted("lib/" + f for f in os.listdir(os.path.join(HERE, "lib")) if f.endswith(".js"))
 MAIN = "entry.js"
 COMPAT = "2025-09-01"
-KEEP = ["secret_text", "plain_text", "kv_namespace", "ai", "durable_object_namespace"]
+KEEP = ["secret_text", "plain_text", "kv_namespace", "ai", "durable_object_namespace", "d1"]
 # גשר הווידאו (מאגר 07, scripts/deploy-news-archive.py) מוזרק לסוף worker.js בשרת החי.
 # כדי שפריסה של הקו לא תמחק אותו, לוקחים אותו מהגרסה החיה ומחברים אותו שוב לקוד החדש.
 BRIDGE_MARKER = "\n\nconst newsVideoAuth="
