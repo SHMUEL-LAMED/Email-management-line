@@ -8,6 +8,12 @@ export * from "./worker.js";
 
 const ORIGIN = "https://shmuel-lamed.github.io";
 
+// קבצים שמועלים מהאתר ל-Claude: כל קובץ נשמר ב-KV בחלקים (cf:<מזהה>:<חלק>) לשלושה ימים,
+// והריצה של Claude מורידה אותם דרך /bridge/file. עד 34 חלקים של 4 מגה לכל היותר (האתר שולח 3 מגה בחלק).
+const UP_PART = 4 * 1024 * 1024, UP_PARTS = 34, UP_TTL = 3 * 86400;
+const upId = (s) => String(s || "").replace(/[^a-z0-9]/gi, "").slice(0, 24);
+const UP_HINT = "\n\n(לריצה של Claude – קובץ שהועלה מהאתר מורידים בחלקים: GET /bridge/file?id=<המזהה>&part=<מספר>, מ-0 עד מספר החלקים פחות אחת, ומחברים לפי הסדר. בלי part מתקבלים פרטי הקובץ. הקובץ נשמר שלושה ימים.)";
+
 // ה-DO של הגשר: שתי פעולות נוספות מעל מה שיש ב-worker.js
 export class CallState extends BaseCallState {
   async fetch(req) {
@@ -44,6 +50,8 @@ export class CallState extends BaseCallState {
           text = text + "\n\n(הקשר – ההודעות הקודמות באותה שיחה באתר:\n" + ctx + ")";
         }
       }
+      // קובץ שהועלה מהאתר (claude_upload): הריצה מקבלת גם הסבר איך להוריד אותו
+      if (/\[קובץ שהועלה: /.test(plain)) text += UP_HINT;
       const res = await super.fetch(new Request("https://do/bridge/add", { method: "POST", body: JSON.stringify({ text: plain.slice(0, 200), kind: "site" }) }));
       const out = await res.json();
       const msgs = (await st.get("msgs")) || [];
@@ -106,6 +114,21 @@ async function claudeSiteApi(req, env, url) {
   if (!tok || !(await env.KV.get("cs:tok:" + (await sha(tok))))) return J({ error: "צריך להיכנס מחדש" }, 401);
   const op = url.pathname.split("/")[2];
   try {
+    if (op === "claude_upload") {
+      // חלק אחד של קובץ: הגוף הוא הבייטים עצמם, והפרטים בפרמטרים
+      if (req.method !== "POST") return J({ error: "שיטה לא מורשית" }, 405);
+      const q = url.searchParams, id = upId(q.get("id")), part = Number(q.get("part")), parts = Number(q.get("parts"));
+      if (id.length < 8 || !Number.isInteger(part) || !Number.isInteger(parts) || parts < 1 || parts > UP_PARTS || part < 0 || part >= parts) return J({ error: "בקשה לא תקינה" }, 400);
+      const buf = await req.arrayBuffer();
+      if (!buf.byteLength) return J({ error: "הקובץ ריק" }, 400);
+      if (buf.byteLength > UP_PART) return J({ error: "החלק גדול מדי" }, 413);
+      await env.KV.put("cf:" + id + ":" + part, buf, { expirationTtl: UP_TTL });
+      if (part === parts - 1) {
+        const meta = { id, name: String(q.get("name") || "file").replace(/[\x00-\x1f]/g, " ").slice(0, 200), type: String(q.get("type") || "").slice(0, 100), size: Number(q.get("size")) || 0, parts, at: Date.now() };
+        await env.KV.put("cf:" + id, JSON.stringify(meta), { expirationTtl: UP_TTL });
+      }
+      return J({ ok: true, id, part });
+    }
     if (op === "claude_send") {
       const body = await req.json().catch(() => ({}));
       const text = String(body.text || "").trim();
@@ -124,11 +147,25 @@ export default {
   ...worker,
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
-    if (url.pathname === "/chatsite/claude_send" || url.pathname === "/chatsite/claude_history") return claudeSiteApi(req, env, url);
+    if (url.pathname === "/chatsite/claude_send" || url.pathname === "/chatsite/claude_history" || url.pathname === "/chatsite/claude_upload") return claudeSiteApi(req, env, url);
     if (url.pathname === "/chatsite/gpt_send" || url.pathname === "/chatsite/gpt_history") return gptMailboxApi(req, env, url);
     if (url.pathname.startsWith("/chatsite/")) return chatSiteApi(req, env, url);
     // בדיקת המפתח קודם: בלי BRIDGE_KEY תקין לא קוראים כלום מהתור
     const bridgeKeyOk = async () => safeEq(url.searchParams.get("k") || req.headers.get("x-bridge-key") || "", env.BRIDGE_KEY);
+    if (url.pathname === "/bridge/file") {
+      // הורדת קובץ שהועלה מהאתר, לריצה של Claude: בלי part – הפרטים, עם part – הבייטים של החלק
+      const J = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+      if (!env.BRIDGE_KEY || !(await bridgeKeyOk())) return J({ error: "forbidden" }, 403);
+      const id = upId(url.searchParams.get("id"));
+      const meta = id ? await env.KV.get("cf:" + id, "json") : null;
+      if (!meta) return J({ error: "הקובץ לא נמצא (או שעברו שלושה ימים)" }, 404);
+      const p = url.searchParams.get("part");
+      if (p == null) return J(meta);
+      const n = Number(p);
+      const buf = Number.isInteger(n) && n >= 0 && n < meta.parts ? await env.KV.get("cf:" + id + ":" + n, "arrayBuffer") : null;
+      if (!buf) return J({ error: "החלק לא נמצא" }, 404);
+      return new Response(buf, { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } });
+    }
     if (url.pathname === "/bridge/answer" && req.method === "POST" && env.CALLS && (await bridgeKeyOk())) {
       // תשובה לשיחה מהאתר: בלי עותק במייל
       const raw = await req.text();
