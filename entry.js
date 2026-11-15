@@ -4,6 +4,7 @@ import { gptMailboxApi } from "./gpt-mailbox.js";
 // והתשובות נשארות באתר – לא מוקראות בקו ולא נשלחות כעותק במייל.
 import worker, { CallState as BaseCallState, safeEq } from "./worker.js";
 import { chatSiteApi } from "./chatsite.js";
+import { accessToken } from "./lib/google.js";
 export * from "./worker.js";
 
 const ORIGIN = "https://shmuel-lamed.github.io";
@@ -165,6 +166,29 @@ export default {
       const buf = Number.isInteger(n) && n >= 0 && n < meta.parts ? await env.KV.get("cf:" + id + ":" + n, "arrayBuffer") : null;
       if (!buf) return J({ error: "החלק לא נמצא" }, 404);
       return new Response(buf, { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } });
+    }
+    if (url.pathname === "/bridge/drive_session") {
+      // העלאת קובץ גדול לדרייב מהריצה של Claude: כאן רק נפתחת העלאה מתמשכת (resumable) עם החיבור של הקו לגוגל,
+      // והריצה שולחת את הבייטים ישירות לכתובת שחוזרת. הכתובת תקפה רק לקובץ האחד הזה.
+      const J = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+      if (!env.BRIDGE_KEY || !(await bridgeKeyOk())) return J({ error: "forbidden" }, 403);
+      if (req.method !== "POST") return J({ error: "שיטה לא מורשית" }, 405);
+      const b = await req.json().catch(() => ({}));
+      const name = String(b.name || "").replace(/[\x00-\x1f]/g, " ").trim().slice(0, 200), size = Number(b.size);
+      if (!name || !Number.isInteger(size) || size < 1 || size > 500 * 1024 * 1024) return J({ error: "בקשה לא תקינה" }, 400);
+      const mime = String(b.mime || "application/octet-stream").slice(0, 100);
+      try {
+        const r = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + (await accessToken(env)), "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": mime, "X-Upload-Content-Length": String(size) },
+          body: JSON.stringify({ name }),
+        });
+        const loc = r.headers.get("location");
+        if (!r.ok || !loc) return J({ error: "הדרייב לא פתח העלאה (" + r.status + ")" }, 502);
+        return J({ url: loc });
+      } catch (e) {
+        return J({ error: "אין חיבור לגוגל" }, 502);
+      }
     }
     if (url.pathname === "/bridge/answer" && req.method === "POST" && env.CALLS && (await bridgeKeyOk())) {
       // תשובה לשיחה מהאתר: בלי עותק במייל
