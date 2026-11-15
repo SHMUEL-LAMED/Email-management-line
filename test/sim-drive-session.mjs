@@ -1,0 +1,30 @@
+// סימולציה: פתיחת העלאה מתמשכת לדרייב מהריצה של Claude (/bridge/drive_session)
+import worker from "../entry.js";
+const kv = new Map([["g:access", "at-123"]]);
+const KV = { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); }, delete: async (k) => { kv.delete(k); } };
+const env = { KV, BRIDGE_KEY: "bk" };
+const ok = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1); } };
+const calls = []; let mode = "ok";
+globalThis.fetch = async (input, init = {}) => {
+  const url = String(input instanceof Request ? input.url : input);
+  calls.push({ url, init });
+  if (!url.startsWith("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable")) throw new Error("unmocked " + url);
+  if (mode === "denied") return new Response("{}", { status: 403 });
+  if (mode === "down") throw new Error("network");
+  return new Response("", { status: 200, headers: { location: "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=SESSION1" } });
+};
+const post = (body, key = "bk") => worker.fetch(new Request("https://w/bridge/drive_session", { method: "POST", headers: key ? { "x-bridge-key": key } : {}, body: JSON.stringify(body) }), env, {});
+ok((await post({ name: "a.zip", size: 10 }, "")).status === 403 && (await post({ name: "a.zip", size: 10 }, "nope")).status === 403, "needs the bridge key");
+ok(calls.length === 0, "nothing sent to Google without the key");
+ok((await post({ name: "", size: 10 })).status === 400 && (await post({ name: "a.zip", size: 0 })).status === 400 && (await post({ name: "a.zip", size: 1.5 })).status === 400 && (await post({ name: "a.zip", size: 600 * 1024 * 1024 })).status === 400, "bad name or size");
+ok(calls.length === 0, "nothing sent to Google for a bad request");
+const r = await post({ name: "אלבום שבת.zip", mime: "application/zip", size: 46204144 });
+const j = await r.json();
+ok(r.status === 200 && j.url.endsWith("upload_id=SESSION1"), "returns the session address");
+const h = calls[0].init.headers;
+ok(h.Authorization === "Bearer at-123" && h["X-Upload-Content-Type"] === "application/zip" && h["X-Upload-Content-Length"] === "46204144", "session opened with the line's Google sign-in and the file details");
+ok(JSON.parse(calls[0].init.body).name === "אלבום שבת.zip", "file name passed to Drive");
+mode = "denied"; ok((await post({ name: "a.zip", size: 10 })).status === 502, "Drive refusal is reported");
+mode = "down"; ok((await post({ name: "a.zip", size: 10 })).status === 502, "network failure is reported");
+ok((await worker.fetch(new Request("https://w/bridge/drive_session", { headers: { "x-bridge-key": "bk" } }), env, {})).status === 405, "GET is not accepted");
+console.log("drive session: passed");
