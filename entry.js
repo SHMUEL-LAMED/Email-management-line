@@ -37,6 +37,17 @@ export class CallState extends BaseCallState {
       ].sort((x, y) => x.at - y.at);
       return new Response(JSON.stringify({ items, live: live.on && Date.now() - live.at < 120e3 }));
     }
+    if (path === "/bridge/linetalk") {
+      // השיחות מהקו בלבד (בלי שיחות האתר), לדף "שיחות מהקו" באתר
+      const msgs = (await st.get("msgs")) || [];
+      const answers = (await st.get("answers")) || [];
+      const site = new Set(msgs.filter((m) => m.kind === "site").map((m) => m.id));
+      const items = [
+        ...msgs.filter((m) => m.kind !== "site").map((m) => ({ id: m.id, from: "me", kind: m.kind, text: m.text, at: m.at })),
+        ...answers.filter((a) => !a.site && !site.has(a.re)).map((a) => ({ id: a.id, from: "claude", text: a.text, at: a.at })),
+      ].sort((x, y) => x.at - y.at).slice(-300);
+      return new Response(JSON.stringify({ items }));
+    }
     if (path === "/bridge/siteadd") {
       // הודעה מהאתר בתוך שיחה מסוימת (conv): נכנסת לתור כרגיל, ומסומנת בשיחה שלה.
       // לריצה של Claude נשלחות גם ההודעות האחרונות מאותה שיחה, כדי שיבין את ההקשר.
@@ -148,6 +159,8 @@ async function claudeSiteApi(req, env, url) {
       const r = await bridgeDo(env, "siteadd", { text: text.slice(0, 16000), conv: body.conv || "" });
       return J({ ok: true, id: r.id });
     }
+    // claude_history?line=1: השיחות מהקו, לדף נפרד באתר
+    if (url.searchParams.get("line") === "1") return J(await bridgeDo(env, "linetalk"));
     return J(await bridgeDo(env, "site"));
   } catch (e) {
     return J({ error: "שגיאה בשרת" }, 500);
