@@ -14,7 +14,7 @@ import { SP_RE, bump, chunkText, cleanForVoice, decSp, pcmToWav, renderPlain, re
 import { GOOGLE_EXPORT, doShare, ensureInDrive, isDriveMedia, runRecSave, shareBack, srcBytes } from "./lib/files.js";
 import { NAV_TARGETS, SETTINGS_PROMPT, SITES_DEFAULT, aiAsk, botSpace, phoneLookup, sitesCheck } from "./lib/settings.js";
 import { PAGE, bridgeApi, connect, isShabbatIL, oauthCallback, statusPage, sunsetIL, testConnection } from "./lib/web.js";
-import { gchatBridge } from "./lib/gchat.js";
+import { chatBridge, gchatBridge, isChatBridge } from "./lib/gchat.js";
 import { PRE_STEPS, WAIT_STEPS, dailySummaryEmail, go, handleYemot, healthCheck, mergeMessages, scheduledTick } from "./lib/flow.js";
 
 export default {
@@ -23,6 +23,7 @@ export default {
     const path = url.pathname;
     if (env.PATH_KEY && path.startsWith("/yemot/") && (await safeEq(path.slice(7), env.PATH_KEY))) return handleYemot(req, env, ctx);
     if (path.startsWith("/bridge/gchat/")) return gchatBridge(req, env, url);
+    if (isChatBridge(path)) return chatBridge(req, env, url);
     if (path.startsWith("/bridge/")) return bridgeApi(req, env, url);
     if (path === "/connect") return connect(env, url);
     if (path === "/oauth/callback") return oauthCallback(env, url);
