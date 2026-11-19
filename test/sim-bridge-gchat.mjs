@@ -1,0 +1,42 @@
+// סימולציה: גוגל צאט לריצה של Claude דרך הגשר (/bridge/gchat/...)
+import worker from "../entry.js";
+const kv = new Map([["g:access", "at-123"], ["g:me", "111"]]);
+const KV = { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); }, delete: async (k) => { kv.delete(k); } };
+const env = { KV, BRIDGE_KEY: "bk" };
+const ok = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1); } };
+const calls = [];
+globalThis.fetch = async (input, init = {}) => {
+  const url = String(input instanceof Request ? input.url : input);
+  calls.push({ url, init });
+  const J = (o) => new Response(JSON.stringify(o), { status: 200, headers: { "content-type": "application/json" } });
+  if (url.includes("/spaceReadState")) return J({ lastReadTime: "2026-01-01T00:00:00Z" });
+  if (url.includes("/members")) return J({ memberships: [{ name: "spaces/A/members/1", member: { name: "users/111", displayName: "שמואל", type: "HUMAN" } }, { name: "spaces/A/members/2", member: { name: "users/222", displayName: "דוד", type: "HUMAN" } }] });
+  if (url.includes("/spaces/A/messages") && (init.method || "GET") === "POST") return J({ name: "spaces/A/messages/new1" });
+  if (url.includes("/spaces/A/messages")) return J({ messages: [{ name: "spaces/A/messages/m1", sender: { name: "users/222" }, text: "שלום", createTime: "2026-11-19T10:00:00Z" }] });
+  if (url.includes("/v1/spaces?")) return J({ spaces: [{ name: "spaces/A", spaceType: "DIRECT_MESSAGE", lastActiveTime: "2026-11-19T10:00:00Z" }] });
+  throw new Error("unmocked " + url);
+};
+const call = (path, opts = {}, key = "bk") => worker.fetch(new Request("https://w/bridge/gchat/" + path, { ...opts, headers: key ? { "x-bridge-key": key } : {} }), env, {});
+ok((await call("spaces", {}, "")).status === 403 && (await call("spaces", {}, "nope")).status === 403, "needs the bridge key");
+ok(calls.length === 0, "nothing sent to Google without the key");
+for (const op of ["login", "logout", "delete", "edit", "leave", "removemember", "file", "group", ""]) ok((await call(op, { method: "POST", body: "{}" })).status === 404, "op not allowed: " + op);
+ok((await call("send")).status === 405 && (await call("spaces", { method: "POST", body: "{}" })).status === 405, "wrong method");
+ok(calls.length === 0, "nothing sent to Google for a refused request");
+let j = await (await call("spaces")).json();
+ok(j.spaces?.length === 1 && j.spaces[0].space === "spaces/A" && j.spaces[0].title === "דוד" && j.spaces[0].unread === true, "lists the chats with names");
+j = await (await call("messages?space=spaces/A")).json();
+ok(j.messages?.length === 1 && j.messages[0].who === "דוד" && j.messages[0].text === "שלום" && j.messages[0].mine === false, "reads messages");
+ok(!calls.some((c) => c.init.method === "PATCH"), "reading does not mark the chat as read");
+ok((await call("messages?space=bad")).status === 400, "bad space refused");
+calls.length = 0;
+const r = await call("send", { method: "POST", body: JSON.stringify({ space: "spaces/A", text: "תודה", files: [{ name: "x", data: "AAAA" }], quote: { id: "spaces/A/messages/m1" } }) });
+ok(r.status === 200 && (await r.json()).id === "spaces/A/messages/new1", "sends a text message");
+const sent = calls.find((c) => c.url.endsWith("/spaces/A/messages") && c.init.method === "POST");
+ok(sent && JSON.stringify(JSON.parse(sent.init.body)) === JSON.stringify({ text: "תודה" }), "only the text is sent (no files or quote from the bridge)");
+ok(!calls.some((c) => c.url.includes("attachments:upload")), "no upload from the bridge");
+ok(JSON.parse(kv.get("log"))[0].includes("Claude"), "a send by Claude is logged");
+ok([...kv.keys()].filter((k) => k.startsWith("cs:tok:")).length === 1, "one internal site token is reused");
+ok((await call("send", { method: "POST", body: JSON.stringify({ space: "spaces/A", text: " " }) })).status === 400, "empty text refused");
+// האתר עצמו עדיין דורש אסימון
+ok((await worker.fetch(new Request("https://w/chatsite/spaces"), env, {})).status === 401, "the site API still needs its token");
+console.log("bridge gchat: passed");
